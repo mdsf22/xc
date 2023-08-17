@@ -1,4 +1,5 @@
 ## config.conf
+
 ```
 {
     "xenserver" : {
@@ -15,19 +16,22 @@
 ```
 
 ## build
+
 ```
 sh build.sh
 ```
 
-
 ## run
+
 ```
 Usage:
    all: list all vms and hosts and srs
    vms: list hosts and vms
    backup <vm_uuid>: backup vm by uuid
-   restore <set_id> <sr_uuid>: restore vm by uuid
+   backup_diff <vm_uuid>: backup diff vm by uuid
+   restore <set_id> <sr_uuid>: restore vm from set_id to sr_uuid
    srs: list storage repository
    sets: list backupset
+   rm <set_id>: remove backupset, if set_id is all, rm all
 
 ```
