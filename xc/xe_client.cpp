@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <sys/stat.h>
 #include <filesystem>
+#include <memory>
 
 #define BACKUP_SET_CONF "backup_set.json"
 #define VM_META_CONF "vm_meta.json"
@@ -23,6 +24,12 @@ typedef struct
     void *handle;
 } xen_comms;
 
+template<class T, class Deleter>
+std::unique_ptr<T, Deleter> make_deleter(T* p, Deleter&& del)
+{
+    return std::unique_ptr<T, Deleter>(p, std::forward<Deleter>(del));
+}
+
 void print_error(xen_session *session)
 {
     for (int i = 0; i < session->error_description_count; i++) {
@@ -30,9 +37,14 @@ void print_error(xen_session *session)
     }
 }
 
-void print_error(const std::string& msg, xen_session *session)
+
+void print_error(xen_session *session, char* format, ...)
 {
-    std::cout << msg << std::endl;
+    va_list args;
+    va_start(args, format);
+    vprintf(format, args);
+    std::cout << std::endl;
+    va_end(args);
     print_error(session);
 }
 
@@ -168,6 +180,61 @@ bool Xe_Client::scan_vms()
     return true;
 }
 
+bool Xe_Client::get_vifs(xen_vm vm, std::vector<struct vif>& vifs)
+{
+    struct xen_vif_set *vif_set = nullptr;
+    if (!xen_vm_get_vifs(session_, &vif_set, vm)) {
+        print_error(session_, (char*)("Failed to get vifs"));
+        return false;
+    }
+
+    auto s = make_deleter(vif_set, [](xen_vif_set* s) {
+        xen_vif_set_free(s);
+    });
+
+    for (int i = 0; i < vif_set->size; ++i) {
+        xen_vif_record *vif_record = nullptr;
+        if (!xen_vif_get_record(session_, &vif_record, vif_set->contents[i])) {
+            print_error(session_, (char*)("Failed to get vif record"));
+            return false;
+        }
+
+        auto v = make_deleter(vif_record, [](xen_vif_record* vif) {
+            xen_vif_record_free(vif);
+        });
+
+        xen_network_record *network_record = nullptr;
+        if ((!xen_network_get_record(session_, &network_record, vif_record->network->u.handle))) {
+            print_error(session_, (char*)("Failed to get network record"));
+            return false;
+        }
+
+        auto n = make_deleter(network_record, [](xen_network_record* n) {
+            xen_network_record_free(n);
+        });
+
+        struct vif vif {
+            .uuid = vif_record->uuid,
+            .device = vif_record->device,
+            .mac = vif_record->mac,
+            .mtu = vif_record->mtu
+        };
+
+        struct network network {
+            .uuid = network_record->uuid,
+            .name_label = network_record->name_label,
+            .name_description = network_record->name_description,
+            .mtu = network_record->mtu,
+            .bridge = network_record->bridge,
+        };
+
+        vif.network = std::move(network);
+        vifs.push_back(std::move(vif));
+    }
+
+    return true;
+}
+
 bool Xe_Client::get_vm(xen_vm x_vm, struct vm& v, bool snapshot)
 {
     xen_vm_record *vm_record = nullptr;
@@ -237,6 +304,11 @@ bool Xe_Client::get_vm(xen_vm x_vm, struct vm& v, bool snapshot)
     }
 
     if (!get_vbds(v, vm_record)) {
+        xen_vm_record_free(vm_record);
+        return false;
+    }
+
+    if (!get_vifs(x_vm, v.vifs)) {
         xen_vm_record_free(vm_record);
         return false;
     }
@@ -359,23 +431,40 @@ void Xe_Client::dump_vm(const struct vm& v)
     for (const auto& vb : v.vbds) {
         dump_vbd(vb);
     }
+
+    for (const auto& vif : v.vifs) {
+        dump_vif(vif);
+    }
 }
 
 void Xe_Client::dump_vbd(const struct vbd& vb)
 {
     std::cout << "      vbd: " << vb.uuid << std::endl;
-    std::cout << "      device: " << vb.device << std::endl;
-    std::cout << "      userdevice: " << vb.userdevice << std::endl;
-    std::cout << "      bootable: " << vb.bootable << std::endl;
-    std::cout << "        vdi: " << vb.vdi.uuid << std::endl;
-    std::cout << "          vdi: " << vb.vdi.vdi << std::endl;
-    std::cout << "          name_label: " << vb.vdi.name_label << std::endl;
-    std::cout << "          name_description: " << vb.vdi.name_description << std::endl;
-    std::cout << "          virtual_size: " << vb.vdi.virtual_size << std::endl;
-    std::cout << "          physical_utilisation: " << vb.vdi.physical_utilisation << std::endl;
-    std::cout << "          type: " << vb.vdi.type << std::endl;
-    std::cout << "          sharable: " << vb.vdi.sharable << std::endl;
-    std::cout << "          read_only: " << vb.vdi.read_only << std::endl;
+    std::cout << "        device: " << vb.device << std::endl;
+    std::cout << "        userdevice: " << vb.userdevice << std::endl;
+    std::cout << "        bootable: " << vb.bootable << std::endl;
+    std::cout << "          vdi: " << vb.vdi.uuid << std::endl;
+    std::cout << "            vdi: " << vb.vdi.vdi << std::endl;
+    std::cout << "            name_label: " << vb.vdi.name_label << std::endl;
+    std::cout << "            name_description: " << vb.vdi.name_description << std::endl;
+    std::cout << "            virtual_size: " << vb.vdi.virtual_size << std::endl;
+    std::cout << "            physical_utilisation: " << vb.vdi.physical_utilisation << std::endl;
+    std::cout << "            type: " << vb.vdi.type << std::endl;
+    std::cout << "            sharable: " << vb.vdi.sharable << std::endl;
+    std::cout << "            read_only: " << vb.vdi.read_only << std::endl;
+}
+
+void Xe_Client::dump_vif(const struct vif& vf)
+{
+    std::cout << "      vif: " << vf.uuid << std::endl;
+    std::cout << "        device: " << vf.device << std::endl;
+    std::cout << "        mac: " << vf.mac << std::endl;
+    std::cout << "        mtu: " << vf.mtu << std::endl;
+    std::cout << "          network: " << vf.network.uuid << std::endl;
+    std::cout << "          name_label: " << vf.network.name_label << std::endl;
+    std::cout << "          name_description: " << vf.network.name_description << std::endl;
+    std::cout << "          mtu: " << vf.network.mtu << std::endl;
+    std::cout << "          bridge: " << vf.network.bridge << std::endl;
 }
 
 bool Xe_Client::dump()
@@ -649,9 +738,29 @@ bool Xe_Client::add_vm_meta(const struct backup_set &bset)
 
         vbds.append(vbd);
     }
-
     vm["vbds"] = vbds;
+
+    Json::Value vifs(Json::arrayValue);
+    for (const auto& v : bset.vm.vifs) {
+        Json::Value vif;
+        vif["uuid"] = v.uuid;
+        vif["device"] = v.device;
+        vif["mac"] = v.mac;
+        vif["mtu"] = v.mtu;
+
+        Json::Value n;
+        n["uuid"] = v.network.uuid;
+        n["name_label"] = v.network.name_label;
+        n["name_description"] = v.network.name_description;
+        n["mtu"] = v.network.mtu;
+        n["bridge"] = v.network.bridge;
+        vif["network"] = n;
+        vifs.append(vif);
+    }
+    vm["vifs"] = vifs;
+
     root["vm"] = vm;
+
 
     std::string file = bset.vm_name + "/" + VM_META_CONF;
     std::ofstream output_file(file);
@@ -1002,6 +1111,34 @@ out:
     if (sr_set) {
         xen_sr_set_free(sr_set);
     }
+
+    return true;
+}
+
+bool Xe_Client::scan_networks()
+{
+    xen_network_set* network_set = nullptr;
+    if (!xen_network_get_all(session_, &network_set)) {
+        std::cout << "Failed to get network set" << std::endl;
+        return false;
+    }
+
+    std::cout << "================ network ================" << std::endl;
+    for (int i = 0; i < network_set->size; i++) {
+        xen_network_record *network_record = nullptr;
+        if (!xen_network_get_record(session_, &network_record, network_set->contents[i])) {
+            std::cout << "Failed to get network record" << std::endl;
+            return false;
+        }
+
+        std::cout << "uuid: " << network_record->uuid << std::endl;
+        std::cout << "  name_label: " << network_record->name_label << std::endl;
+        std::cout << "  name_description: " << network_record->name_description << std::endl;
+        std::cout << "  bridge: " << network_record->bridge << std::endl;
+        std::cout << "  MTU: " << network_record->mtu << std::endl;
+        std::cout << "  managed " << network_record->managed << std::endl;
+    }
+     std::cout << "======================================" << std::endl;
 
     return true;
 }

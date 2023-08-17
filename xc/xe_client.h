@@ -9,6 +9,22 @@ extern "C"
 #include <vector>
 #include <map>
 
+struct network {
+    std::string uuid;
+    std::string name_label;
+    std::string name_description;
+    int64_t mtu;
+    std::string bridge;
+};
+
+struct vif {
+    std::string uuid;
+    std::string device;
+    std::string mac;
+    int64_t mtu;
+    struct network network;
+};
+
 struct vdi {
     std::string uuid;
     std::string vdi;
@@ -69,6 +85,7 @@ struct vm {
     std::map<std::string, std::string> other_config;
 
     std::vector<struct vbd> vbds;
+    std::vector<struct vif> vifs;
     std::string host_uuid;
 };
 
@@ -109,6 +126,7 @@ public:
     bool scan_hosts();
     bool scan_vms();
     bool scan_srs();
+    bool scan_networks();
 
     bool backup_vm(const std::string &vm_uuid, const std::string &backup_dir);
     bool backup_vm_diff(const std::string &vm_uuid, const std::string &backup_dir);
@@ -126,6 +144,7 @@ private:
     std::string export_url(xen_task task,
                            const std::string& vdi,
                            const std::string& base);
+    bool get_vifs(xen_vm x_vm, std::vector<struct vif>& vifs);
     std::string import_url(xen_task task, const std::string& vdi);
     void progress(xen_task task);
     bool load_vm_meta(const std::string& file, struct vm &vm);
@@ -152,6 +171,8 @@ private:
     bool create_new_vm_by_template(std::string& vm_uuid);
     void dump_vm(const struct vm& v);
     void dump_vbd(const struct vbd& vb);
+    void dump_vif(const struct vif& vf);
+
     std::string find_basevdi_by_userdevice(const struct vm& v, const std::string& userdevice);
     void update_backup_set(const std::vector<struct backup_set>& bsets);
     bool delete_snapshot(xen_vm vm);

@@ -79,6 +79,13 @@ void dump_backupsets(const struct args& args)
     c.backupset_list();
 }
 
+void dump_host_networks(const struct args& args)
+{
+    Xe_Client c(args.url, args.username, args.password);
+    c.connect();
+    c.scan_networks();
+}
+
 void rm_backup_set(const struct args& args, const std::string& set_id)
 {
     Xe_Client c(args.url, args.username, args.password);
@@ -94,6 +101,7 @@ void usage()
     std::cout << "   backup_diff <vm_uuid>: backup diff vm by uuid" << std::endl;
     std::cout << "   restore <set_id> <sr_uuid>: restore vm from set_id to sr_uuid" << std::endl;
     std::cout << "   srs: list storage repository" << std::endl;
+    std::cout << "   networks: list network of host" << std::endl;
     std::cout << "   sets: list backupset" << std::endl;
     std::cout << "   rm <set_id>: remove backupset, if set_id is all, rm all" << std::endl;
 }
@@ -151,6 +159,9 @@ int main(int argc, char*argv[])
                 }
             } else if (strcmp(argv[i], "srs") == 0) {
                 dump_srs(args);
+                return 0;
+            } else if (strcmp(argv[i], "network") == 0) {
+                dump_host_networks(args);
                 return 0;
             } else if (strcmp(argv[i], "sets") == 0) {
                 dump_backupsets(args);
