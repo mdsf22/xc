@@ -8,23 +8,33 @@
 #include <iomanip>
 #include <json/json.h>
 #include <thread>
+#include <algorithm>
 #include <sys/stat.h>
+#include <filesystem>
 
 #define BACKUP_SET_CONF "backup_set.json"
 #define VM_META_CONF "vm_meta.json"
+
+#define BACKUP_TYPE_FULL "full"
+#define BACKUP_TYPE_DIFF "diff"
 typedef struct
 {
     xen_result_func func;
     void *handle;
 } xen_comms;
 
-const char *VM_POWER_STATE[] = {
-    "VM_POWER_STATE_HALTED",
-    "VM_POWER_STATE_PAUSED",
-    "VM_POWER_STATE_RUNNING",
-    "VM_POWER_STATE_SUSPENDED",
-    "VM_POWER_STATE_UNDEFINED"
-};
+void print_error(xen_session *session)
+{
+    for (int i = 0; i < session->error_description_count; i++) {
+        std::cout << session->error_description[i] << std::endl;
+    }
+}
+
+void print_error(const std::string& msg, xen_session *session)
+{
+    std::cout << msg << std::endl;
+    print_error(session);
+}
 
 size_t writefile(void* contents, size_t size, size_t nmemb, void* userp) {
     size_t totalSize = size * nmemb;
@@ -201,6 +211,31 @@ bool Xe_Client::get_vm(xen_vm x_vm, struct vm& v, bool snapshot)
     v.actions_after_reboot = (int)vm_record->actions_after_reboot;
     v.actions_after_crash = (int)vm_record->actions_after_crash;
 
+    v.pv_bootloader = vm_record->pv_bootloader;
+    v.pv_kernel = vm_record->pv_kernel;
+    v.pv_ramdisk = vm_record->pv_ramdisk;
+    v.pv_args = vm_record->pv_args;
+    v.pv_bootloader_args = vm_record->pv_bootloader_args;
+    v.pv_legacy_args = vm_record->pv_legacy_args;
+    v.hvm_boot_policy = vm_record->hvm_boot_policy;
+
+    for (int m = 0; m < vm_record->hvm_boot_params->size; m++) {
+        xen_string_string_map_contents pair = vm_record->hvm_boot_params->contents[m];
+        v.hvm_boot_params[pair.key] = pair.val;
+    }
+
+    v.hvm_shadow_multiplier = vm_record->hvm_shadow_multiplier;
+
+    for (int m = 0; m < vm_record->platform->size; m++) {
+        xen_string_string_map_contents pair = vm_record->platform->contents[m];
+        v.platform[pair.key] = pair.val;
+    }
+
+    for (int m = 0; m < vm_record->other_config->size; m++) {
+        xen_string_string_map_contents pair = vm_record->other_config->contents[m];
+        v.other_config[pair.key] = pair.val;
+    }
+
     if (!get_vbds(v, vm_record)) {
         xen_vm_record_free(vm_record);
         return false;
@@ -210,14 +245,15 @@ bool Xe_Client::get_vm(xen_vm x_vm, struct vm& v, bool snapshot)
         char* host_uuid = nullptr;
         if (!xen_host_get_uuid(session_, &host_uuid, vm_record->resident_on->u.handle)) {
             std::cout << "Failed to get host uuid" << std::endl;
-            xen_vm_record_free(vm_record);
-            return false;
+            // must clear error, otherwise next call will fail
+            xen_session_clear_error(session_);
         } else {
             v.host_uuid = host_uuid;
             free(host_uuid);
         }
     }
 
+    xen_vm_record_free(vm_record);
     return true;
 }
 
@@ -240,6 +276,8 @@ bool Xe_Client::get_vbds(struct vm &v, xen_vm_record *vm_record)
             struct vbd vb;
             vb.uuid = vrec->uuid;
             vb.bootable = vrec->bootable;
+            vb.device = vrec->device;
+            vb.userdevice = vrec->userdevice;
             if (!vrec->vdi) {
                 v.vbds.push_back(std::move(vb));
                 xen_vbd_record_free(vrec);
@@ -268,6 +306,78 @@ bool Xe_Client::get_vbds(struct vm &v, xen_vm_record *vm_record)
     return true;
 }
 
+void Xe_Client::dump_vm(const struct vm& v)
+{
+    std::cout << "    vm: " << v.uuid << std::endl;
+    std::cout << "      allowed_operation: ";
+    for (const auto& m : v.allowed_operations)
+        std::cout << m << ",";
+    std::cout << std::endl;
+
+    std::cout << "      power_state: " << v.power_state << std::endl;
+    std::cout << "      name: " << v.name_label << std::endl;
+    std::cout << "      name_description: " << v.name_description << std::endl;
+    std::cout << "      user_version: " << v.user_version << std::endl;
+    std::cout << "      is_a_template: " << v.is_a_template << std::endl;
+
+    std::cout << "      memory_overhead: " << v.memory_overhead << std::endl;
+    std::cout << "      memory_target: " << v.memory_target << std::endl;
+    std::cout << "      memory_static_max: " << v.memory_static_max << std::endl;
+    std::cout << "      memory_dynamic_max: " << v.memory_dynamic_max << std::endl;
+    std::cout << "      memory_dynamic_min: " << v.memory_dynamic_min << std::endl;
+    std::cout << "      memory_static_min: " << v.memory_static_min << std::endl;
+
+    std::cout << "      vcpus_params: " << std::endl;
+    for (const auto&m : v.vcpus_params)
+        std::cout << "        key: " << m.first << ", val: " << m.second << std::endl;
+
+    std::cout << "      vcpus_max: " << v.vcpus_max << std::endl;
+    std::cout << "      vcpus_at_startup: " << v.vcpus_at_startup << std::endl;
+    std::cout << "      actions_after_shutdown: " << v.actions_after_shutdown << std::endl;
+    std::cout << "      actions_after_reboot: " << v.actions_after_reboot << std::endl;
+    std::cout << "      actions_after_crash: " << v.actions_after_crash << std::endl;
+    std::cout << "      pv_bootloader: " << v.pv_bootloader << std::endl;
+    std::cout << "      pv_kernel: " << v.pv_kernel << std::endl;
+    std::cout << "      pv_ramdisk: " << v.pv_ramdisk << std::endl;
+    std::cout << "      pv_args: " << v.pv_args << std::endl;
+    std::cout << "      pv_bootloader_args: " << v.pv_bootloader_args << std::endl;
+    std::cout << "      pv_legacy_args: " << v.pv_legacy_args << std::endl;
+    std::cout << "      hvm_boot_policy: " << v.hvm_boot_policy << std::endl;
+    std::cout << "      hvm_boot_params: " << std::endl;
+    for (const auto&m : v.hvm_boot_params)
+        std::cout << "        key: " << m.first << ", value" << m.second << std::endl;
+
+    std::cout << "      hvm_shadow_multiplier: " << v.hvm_shadow_multiplier << std::endl;
+    std::cout << "      platform: " << std::endl;
+    for (const auto&m : v.platform)
+        std::cout << "        key: " << m.first << ", value: " << m.second << std::endl;
+
+    std::cout << "      other config: " << std::endl;
+    for (const auto&m : v.other_config)
+        std::cout << "        key: " << m.first << ", value" << m.second << std::endl;
+
+    for (const auto& vb : v.vbds) {
+        dump_vbd(vb);
+    }
+}
+
+void Xe_Client::dump_vbd(const struct vbd& vb)
+{
+    std::cout << "      vbd: " << vb.uuid << std::endl;
+    std::cout << "      device: " << vb.device << std::endl;
+    std::cout << "      userdevice: " << vb.userdevice << std::endl;
+    std::cout << "      bootable: " << vb.bootable << std::endl;
+    std::cout << "        vdi: " << vb.vdi.uuid << std::endl;
+    std::cout << "          vdi: " << vb.vdi.vdi << std::endl;
+    std::cout << "          name_label: " << vb.vdi.name_label << std::endl;
+    std::cout << "          name_description: " << vb.vdi.name_description << std::endl;
+    std::cout << "          virtual_size: " << vb.vdi.virtual_size << std::endl;
+    std::cout << "          physical_utilisation: " << vb.vdi.physical_utilisation << std::endl;
+    std::cout << "          type: " << vb.vdi.type << std::endl;
+    std::cout << "          sharable: " << vb.vdi.sharable << std::endl;
+    std::cout << "          read_only: " << vb.vdi.read_only << std::endl;
+}
+
 bool Xe_Client::dump()
 {
     for (const auto& h : hosts_) {
@@ -275,47 +385,7 @@ bool Xe_Client::dump()
         std::cout << "  address: " << h.second.address << std::endl;
         std::cout << "  hostname: " << h.second.host << std::endl;
         for (const auto& v: h.second.vms) {
-            std::cout << "    vm: " << v.uuid << std::endl;
-
-            std::cout << "      allowed_operation: ";
-            for (const auto& m : v.allowed_operations)
-                std::cout << m << ",";
-            std::cout << std::endl;
-
-            std::cout << "      power_state: " << v.power_state << std::endl;
-            std::cout << "      name: " << v.name_label << std::endl;
-            std::cout << "      name_description: " << v.name_description << std::endl;
-            std::cout << "      user_version: " << v.user_version << std::endl;
-            std::cout << "      is_a_template: " << v.is_a_template << std::endl;
-
-            std::cout << "      memory_overhead: " << v.memory_overhead << std::endl;
-            std::cout << "      memory_target: " << v.memory_target << std::endl;
-            std::cout << "      memory_static_max: " << v.memory_static_max << std::endl;
-            std::cout << "      memory_dynamic_max: " << v.memory_dynamic_max << std::endl;
-            std::cout << "      memory_dynamic_min: " << v.memory_dynamic_min << std::endl;
-            std::cout << "      memory_static_min: " << v.memory_static_min << std::endl;
-
-            for (const auto&m : v.vcpus_params)
-                std::cout << "      vcpus_params: " << m.first << "=" << m.second << std::endl;
-
-            std::cout << "      vcpus_max: " << v.vcpus_max << std::endl;
-            std::cout << "      vcpus_at_startup: " << v.vcpus_at_startup << std::endl;
-            std::cout << "      actions_after_shutdown: " << v.actions_after_shutdown << std::endl;
-            std::cout << "      actions_after_reboot: " << v.actions_after_reboot << std::endl;
-            std::cout << "      actions_after_crash: " << v.actions_after_crash << std::endl;
-
-            for (const auto& vb : v.vbds) {
-                std::cout << "      vbd: " << vb.uuid << std::endl;
-                std::cout << "      bootable: " << vb.bootable << std::endl;
-                std::cout << "        vdi: " << vb.vdi.uuid << std::endl;
-                std::cout << "          name_label: " << vb.vdi.name_label << std::endl;
-                std::cout << "          name_description: " << vb.vdi.name_description << std::endl;
-                std::cout << "          virtual_size: " << vb.vdi.virtual_size << std::endl;
-                std::cout << "          physical_utilisation: " << vb.vdi.physical_utilisation << std::endl;
-                std::cout << "          type: " << vb.vdi.type << std::endl;
-                std::cout << "          sharable: " << vb.vdi.sharable << std::endl;
-                std::cout << "          read_only: " << vb.vdi.read_only << std::endl;
-            }
+            dump_vm(v);
         }
     }
 
@@ -437,7 +507,7 @@ bool Xe_Client::add_backup_set(const struct backup_set &bset)
 
     Json::Value s;
     s["date"] = bset.date;
-    s["vm_name"] = bset.vm_name;
+    s["set_id"] = bset.vm_name;
     s["vm_uuid"] = bset.vm_uuid;
     s["type"] = bset.type;
     root["sets"].append(s);
@@ -445,6 +515,35 @@ bool Xe_Client::add_backup_set(const struct backup_set &bset)
     std::ofstream output_file(BACKUP_SET_CONF);
     output_file << root;
     output_file.close();
+
+    return true;
+}
+
+bool Xe_Client::load_backup_sets(std::vector<struct backup_set>& bsets)
+{
+    std::ifstream input_file(BACKUP_SET_CONF);
+    Json::CharReaderBuilder reader;
+    Json::Value root;
+    JSONCPP_STRING errs;
+
+    if (!Json::parseFromStream(reader, input_file, &root, &errs)) {
+        std::cout << "Error parsing JSON: " << errs << std::endl;
+        input_file.close();
+        return false;
+    }
+
+    input_file.close();
+
+    for (const auto& s : root["sets"]) {
+        struct backup_set bset {
+            .vm_name = s["set_id"].asString(),
+            .vm_uuid = s["vm_uuid"].asString(),
+            .date = s["date"].asString(),
+            .type = s["type"].asString()
+        };
+
+        bsets.emplace_back(std::move(bset));
+    }
 
     return true;
 }
@@ -459,16 +558,85 @@ bool Xe_Client::add_vm_meta(const struct backup_set &bset)
 
     Json::Value vm;
     vm["uuid"] = bset.vm.uuid;
+
+    for (const auto& m : bset.vm.allowed_operations) {
+        vm["allowed_operations"].append(m);
+    }
+
+    vm["power_state"] = bset.vm.power_state;
     vm["name_label"] = bset.vm.name_label;
     vm["name_description"] = bset.vm.name_description;
+    vm["user_version"] = bset.vm.user_version;
+    vm["is_a_template"] = bset.vm.is_a_template;
+    vm["memory_overhead"] = bset.vm.memory_overhead;
+    vm["memory_target"] = bset.vm.memory_target;
+    vm["memory_static_max"] = bset.vm.memory_static_max;
+    vm["memory_dynamic_max"] = bset.vm.memory_dynamic_max;
+    vm["memory_dynamic_min"] = bset.vm.memory_dynamic_min;
+    vm["memory_static_min"] = bset.vm.memory_static_min;
+
+    Json::Value vcpus_params(Json::arrayValue);
+    for (const auto& vc : bset.vm.vcpus_params) {
+        Json::Value ob;
+        ob["key"] = vc.first;
+        ob["value"] = vc.second;
+        vcpus_params.append(ob);
+    }
+    vm["vcpus_params"] = vcpus_params;
+
+    vm["vcpus_max"] = bset.vm.vcpus_max;
+    vm["vcpus_at_startup"] = bset.vm.vcpus_at_startup;
+    vm["actions_after_shutdown"] = bset.vm.actions_after_shutdown;
+    vm["actions_after_reboot"] = bset.vm.actions_after_reboot;
+    vm["actions_after_crash"] = bset.vm.actions_after_crash;
+
+    vm["pv_bootloader"] = bset.vm.pv_bootloader;
+    vm["pv_kernel"] = bset.vm.pv_kernel;
+    vm["pv_ramdisk"] = bset.vm.pv_ramdisk;
+    vm["pv_args"] = bset.vm.pv_args;
+    vm["pv_bootloader_args"] = bset.vm.pv_bootloader_args;
+    vm["pv_legacy_args"] = bset.vm.pv_legacy_args;
+    vm["hvm_boot_policy"] = bset.vm.hvm_boot_policy;
+
+    Json::Value hvm_boot_params(Json::arrayValue);
+    for (const auto& h : bset.vm.hvm_boot_params) {
+        Json::Value ob;
+        ob["key"] = h.first;
+        ob["value"] = h.second;
+        hvm_boot_params.append(ob);
+    }
+    vm["hvm_boot_params"] = hvm_boot_params;
+
+    vm["hvm_shadow_multiplier"] = bset.vm.hvm_shadow_multiplier;
+
+    Json::Value platforms(Json::arrayValue);
+    for (const auto& ps : bset.vm.platform) {
+        Json::Value ob;
+        ob["key"] = ps.first;
+        ob["value"] = ps.second;
+        platforms.append(ob);
+    }
+    vm["platform"] = platforms;
+
+    Json::Value other_config(Json::arrayValue);
+    for (const auto& h : bset.vm.other_config) {
+        Json::Value ob;
+        ob["key"] = h.first;
+        ob["value"] = h.second;
+        other_config.append(ob);
+    }
+    vm["other_config"] = other_config;
 
     Json::Value vbds(Json::arrayValue);
     for (const auto& b : bset.vm.vbds) {
         Json::Value vbd;
         vbd["uuid"] = b.uuid;
         vbd["bootable"] = b.bootable;
+        vbd["device"] = b.device;
+        vbd["userdevice"] = b.userdevice;
 
         Json::Value vdi;
+        vdi["vdi"] = b.vdi.vdi;
         vdi["uuid"] = b.vdi.uuid;
         vdi["name_label"] = b.vdi.name_label;
         vdi["name_description"] = b.vdi.name_description;
@@ -493,10 +661,59 @@ bool Xe_Client::add_vm_meta(const struct backup_set &bset)
     return true;
 }
 
+bool Xe_Client::backup_vm_diff(const std::string &vm_uuid, const std::string &backup_dir)
+{
+    std::vector<struct backup_set> sets;
+    if (!load_backup_sets(sets)) {
+        std::cout << "Failed to get backup sets" << std::endl;
+        return false;
+    }
+
+    // find the latest full backup set by vm_uuid
+    auto it = std::find_if(sets.rbegin(), sets.rend(), [&vm_uuid](const struct backup_set& bset) {
+        return bset.vm_uuid == vm_uuid && bset.type == BACKUP_TYPE_FULL;
+    });
+
+    if (it == sets.rend()) {
+        std::cout << "Failed to find full backup set for vm: " << vm_uuid << std::endl;
+        return false;
+    }
+
+    std::string set_id = it->vm_name;
+    std::cout << "Found full backup set: " << set_id << std::endl;
+
+    std::string meta_file = set_id + "/" + VM_META_CONF;
+    struct vm v;
+    if (!load_vm_meta(meta_file, v)) {
+        std::cout << "Failed to load vm meta: " << meta_file << std::endl;
+        return false;
+    }
+
+    struct backup_set bt;
+    if (!backup_vm_i(vm_uuid, backup_dir, bt, BACKUP_TYPE_DIFF, v)) {
+        std::cout << "Failed to backup diff vm: " << vm_uuid << std::endl;
+        return false;
+    }
+
+    bt.type = BACKUP_TYPE_DIFF;
+    if (!add_backup_set(bt)) {
+        std::cout << "Failed to add backup set: " << vm_uuid << std::endl;
+        return false;
+    }
+
+    if (!add_vm_meta(bt)) {
+        std::cout << "Failed to add vm meta: " << vm_uuid << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
 bool Xe_Client::backup_vm(const std::string &vm_uuid, const std::string &backup_dir)
 {
     struct backup_set bt;
-    if (!backup_vm_i(vm_uuid, backup_dir, bt)) {
+    struct vm v;
+    if (!backup_vm_i(vm_uuid, backup_dir, bt, BACKUP_TYPE_FULL, v)) {
         std::cout << "Failed to backup vm: " << vm_uuid << std::endl;
         return false;
     }
@@ -514,7 +731,11 @@ bool Xe_Client::backup_vm(const std::string &vm_uuid, const std::string &backup_
     return true;
 }
 
-bool Xe_Client::backup_vm_i(const std::string &vm_uuid, const std::string &backup_dir, struct backup_set &bt)
+bool Xe_Client::backup_vm_i(const std::string &vm_uuid,
+                            const std::string &backup_dir,
+                            struct backup_set &bt,
+                            const std::string& backup_type,
+                            const struct vm& full_v)
 {
     xen_vm backup_vm = nullptr;
     if (!xen_vm_get_by_uuid(session_, &backup_vm, (char *)vm_uuid.c_str())) {
@@ -522,17 +743,24 @@ bool Xe_Client::backup_vm_i(const std::string &vm_uuid, const std::string &backu
         return false;
     }
 
-    bool ret = true;
+    xen_vm_record *vm_record = nullptr;
+    if (!xen_vm_get_record(session_, &vm_record, backup_vm)) {
+        std::cout << "Failed to get vm record" << std::endl;
+        return false;
+    }
+
+    std::string name = vm_record->name_label;
+    std::string desc = vm_record->name_description;
+    xen_vm_record_free(vm_record);
 
     std::string cur_date = current_time_str();
     bt.date = cur_date;
-    bt.type = "full";
+    bt.type = BACKUP_TYPE_FULL;
     std::string snap_name = vm_uuid + "_" + cur_date;
     std::cout << "snap_name: " << snap_name << std::endl;
     bt.vm_name = snap_name;
     bt.vm_uuid = vm_uuid;
 
-    xen_vbd_set* vbd_set = nullptr;
     // do snapshot
     xen_vm snap_handle = nullptr;
     if (!xen_vm_snapshot(session_, &snap_handle,
@@ -545,123 +773,53 @@ bool Xe_Client::backup_vm_i(const std::string &vm_uuid, const std::string &backu
     struct vm v;
     if (!get_vm(snap_handle, v, true)) {
         std::cout << "Failed to get vm: " << vm_uuid << std::endl;
+        delete_snapshot(snap_handle);
         return false;
     }
+    v.name_label = name;
+    v.name_description = desc;
 
     mkdir(snap_name.c_str(), 0777);
+    bool ret = true;
     for (const auto &vb : v.vbds) {
+        std::string basevdi;
+        if (backup_type == BACKUP_TYPE_DIFF) {
+            basevdi = find_basevdi_by_userdevice(full_v, vb.userdevice);
+            if (basevdi.empty()) {
+                std::cout << "Failed to find basevdi by userdevice: " << vb.userdevice << std::endl;
+                ret = false;
+                break;
+            }
+        }
+
         xen_task task = nullptr;
         std::string task_name("export_raw_vdi");
         if (!xen_task_create(session_, &task, (char*)task_name.c_str(),
-                                const_cast<char *>("task"))) {
+                             const_cast<char *>("task"))) {
             std::cout << "Failed to create task" << std::endl;
-            xen_vbd_set_free(vbd_set);
-            return false;
+            ret = false;
+            break;
         }
 
         std::string file = snap_name + "/" + vb.vdi.uuid + ".vhd";
-        std::string url = export_url(task, vb.vdi.vdi);
+        std::string url = export_url(task, vb.vdi.vdi, basevdi);
         std::thread t(&Xe_Client::http_download, this, url, file);
         progress(task);
         t.join();
         xen_task_free(task);
     }
 
+    if (!ret) {
+        delete_snapshot(snap_handle);
+        xen_vm_free(snap_handle);
+        return false;
+    }
+
+    if (backup_type == BACKUP_TYPE_DIFF)
+        delete_snapshot(snap_handle);
+
     bt.vm = std::move(v);
-
-    // // get vdb by snapshot
-    // if (!xen_vm_get_vbds(session_, &vbd_set, snap_handle)) {
-    //     std::cout << "Failed to get vbd set by vm: " << vm_uuid << std::endl;
-    //     xen_vm_free(snap_handle);
-    //     return false;
-    // }
-    // xen_vm_free(snap_handle);
-
-    // if (!vbd_set) {
-    //     std::cout << "vbd set is null" << std::endl;
-    //     return false;
-    // }
-
-    // for (int i = 0; i < vbd_set->size; i++) {
-    //     struct vbd vb;
-    //     if (!vbd_set->contents[i]) {
-    //         continue;
-    //     }
-
-    //     enum xen_vbd_type result_vbd_type = XEN_VBD_TYPE_UNDEFINED;
-    //     if (!xen_vbd_get_type(session_, &result_vbd_type, vbd_set->contents[i])) {
-    //         std::cout << "Failed to get vbd type" << std::endl;
-    //         xen_vbd_set_free(vbd_set);
-    //         return false;
-    //     }
-
-    //     if (result_vbd_type != XEN_VBD_TYPE_DISK) {
-    //         continue;
-    //     }
-
-    //     // get vdi by vbd
-    //     xen_vdi vdi_of_vbd = nullptr;
-    //     if (!xen_vbd_get_vdi(session_, &vdi_of_vbd, vbd_set->contents[i])) {
-    //         std::cout << "Failed to get vdi by vbd" << std::endl;
-    //         xen_vbd_set_free(vbd_set);
-    //         return false;
-    //     }
-
-    //     if (!vdi_of_vbd) {
-    //         std::cout << "vdi of vbd is null" << std::endl;
-    //         xen_vbd_set_free(vbd_set);
-    //         return false;
-    //     }
-
-    //     if (strcmp("OpaqueRef:NULL", (char *)vdi_of_vbd)) {
-    //         char* vdi_uuid = nullptr;
-    //         if (!xen_vdi_get_uuid(session_, &vdi_uuid, vdi_of_vbd)) {
-    //             std::cout << "Failed to get vdi uuid" << std::endl;
-    //             xen_vbd_set_free(vbd_set);
-    //             return false;
-    //         }
-
-    //         if (!vdi_uuid) {
-    //             std::cout << "vdi uuid is null" << std::endl;
-    //             xen_vbd_set_free(vbd_set);
-    //             return false;
-    //         }
-    //         vb.vdi.uuid = vdi_uuid;
-
-    //         xen_vdi_record *vdi_record = nullptr;
-    //         if (xen_vdi_get_record(session_, &vdi_record, vdi_of_vbd)) {
-    //             vb.vdi.uuid = vdi_record->uuid;
-    //             vb.vdi.name_label = vdi_record->name_label;
-    //             vb.vdi.name_description = vdi_record->name_description;
-    //             vb.vdi.virtual_size = vdi_record->virtual_size;
-    //             vb.vdi.physical_utilisation = vdi_record->physical_utilisation;
-    //             vb.vdi.type = vdi_record->type;
-    //             vb.vdi.sharable = vdi_record->sharable;
-    //             vb.vdi.read_only = vdi_record->read_only;
-    //             xen_vdi_record_free(vdi_record);
-    //         } else {
-    //             std::cout << "Failed to get vdi record" << std::endl;
-    //         }
-    //         bt.vm.vbds.push_back(vb);
-
-    //         xen_task task = nullptr;
-    //         std::string task_name("export_raw_vdi");
-    //         if (!xen_task_create(session_, &task, (char*)task_name.c_str(),
-    //                              const_cast<char *>("task"))) {
-    //             std::cout << "Failed to create task" << std::endl;
-    //             xen_vbd_set_free(vbd_set);
-    //             return false;
-    //         }
-
-    //         mkdir(snap_name.c_str(), 0777);
-    //         std::string file = snap_name + "/" + vdi_uuid + ".vhd";
-    //         std::string url = export_url(task, vdi_of_vbd);
-    //         std::thread t(&Xe_Client::http_download, this, url, file);
-    //         progress(task);
-    //         t.join();
-    //         free(vdi_uuid);
-    //     }
-    // }
+    xen_vm_free(snap_handle);
 
     return true;
 }
@@ -669,14 +827,14 @@ bool Xe_Client::backup_vm_i(const std::string &vm_uuid, const std::string &backu
 void Xe_Client::http_download(const std::string &url, const std::string &file)
 {
     std::cout << "start to http download" << std::endl;
-    CURL *curl =NULL;
+    CURL *curl = nullptr;
     CURLcode res;
     long http_code;
     std::ofstream output_file(file, std::ios::binary);
 
     curl = curl_easy_init();
 
-    if (curl){
+    if (curl) {
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writefile);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &output_file);
@@ -685,14 +843,17 @@ void Xe_Client::http_download(const std::string &url, const std::string &file)
         res = curl_easy_perform(curl);
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
         curl_easy_cleanup(curl);
-        output_file.close();
     }
+
+    output_file.close();
+    std::cout << "curl rc :" << res << std::endl;
+    std::cout << "http code: " << http_code << std::endl;
 }
 
 void Xe_Client::http_upload(const std::string &url, const std::string &file)
 {
-    std::cout << "start to http download" << std::endl;
-    CURL *curl =NULL;
+    std::cout << "start to http upload" << std::endl;
+    CURL *curl = nullptr;
     CURLcode res;
     long http_code;
     std::ifstream upload_file(file, std::ios::binary);
@@ -743,7 +904,9 @@ void Xe_Client::progress(xen_task task)
     return;
 }
 
-std::string Xe_Client::export_url(xen_task task, const std::string& vdi)
+std::string Xe_Client::export_url(xen_task task,
+                                  const std::string& vdi,
+                                  const std::string& base)
 {
     std::string url = host_;
     url.append("/export_raw_vdi?session_id=");
@@ -754,11 +917,16 @@ std::string Xe_Client::export_url(xen_task task, const std::string& vdi)
     url.append(vdi);
     url.append("&format=vhd");
 
+    if (!base.empty()) {
+        url.append("&base=");
+        url.append(base);
+    }
+
     std::cout << "export_url: " << url << std::endl;
     return url;
 }
 
-std::string Xe_Client::import_url(xen_task task, xen_vdi vdi)
+std::string Xe_Client::import_url(xen_task task, const std::string& vdi)
 {
     std::string url = host_;
     url.append("/import_raw_vdi?session_id=");
@@ -766,7 +934,7 @@ std::string Xe_Client::import_url(xen_task task, xen_vdi vdi)
     url.append("&task_id=");
     url.append((char *)task);
     url.append("&vdi=");
-    url.append((char *)vdi);
+    url.append(vdi);
     url.append("&format=vhd");
 
     std::cout << "import_url: " << url << std::endl;
@@ -840,16 +1008,54 @@ out:
 
 bool Xe_Client::restore_vm(const std::string& set_id, const std::string& sr_uuid)
 {
-    struct vm v;
-    std::string meta_file = set_id + "/" + VM_META_CONF;
-    if (!load_vm_meta(meta_file, v)) {
-        std::cout << "Failed to load vm meta from " << meta_file << std::endl;
+    std::vector<struct backup_set> sets;
+    if (!load_backup_sets(sets)) {
+        std::cout << "Failed to get backup sets" << std::endl;
         return false;
     }
 
-    if (!restore_vm_i(set_id, sr_uuid, v)) {
-        std::cout << "Failed to restore vm " << v.name_label << std::endl;
+    auto it = std::find_if(sets.begin(), sets.end(), [&set_id](const struct backup_set& bset) {
+        return bset.vm_name == set_id;
+    });
+
+    if (it == sets.end()) {
+        std::cout << "Failed to find backup set: " << set_id << std::endl;
         return false;
+    }
+
+    std::string type = it->type;
+    std::string new_uuid;
+    if (type == BACKUP_TYPE_FULL) {
+        std::cout << "full_set_id: " << set_id << std::endl;
+        if (!restore_vm_full(set_id, sr_uuid, new_uuid)) {
+            std::cout << "Failed to restore vm " << set_id << std::endl;
+            return false;
+        }
+    } else {
+        std::string vm_uuid = it->vm_uuid;
+
+        // diff restore, find the latest full backup set
+        auto it2 = std::find_if(sets.rbegin(), sets.rend(), [&vm_uuid](const struct backup_set& bset) {
+            return bset.vm_uuid == vm_uuid && bset.type == BACKUP_TYPE_FULL;
+        });
+
+        if (it2 == sets.rend()) {
+            std::cout << "Failed to find full backup set for vm: " << vm_uuid << std::endl;
+            return false;
+        }
+
+        std::string full_set_id = it2->vm_name;
+        std::cout << "full_set_id: " << full_set_id << std::endl;
+        if (!restore_vm_full(full_set_id, sr_uuid, new_uuid)) {
+            std::cout << "Failed to restore vm " << set_id << std::endl;
+            return false;
+        }
+
+        std::cout << "==== start to restore diff set: " << set_id << std::endl;
+        if (!restore_vm_diff(set_id, sr_uuid, new_uuid)) {
+            std::cout << "Failed to restore vm " << set_id << std::endl;
+            return false;
+        }
     }
 
     return true;
@@ -871,9 +1077,56 @@ bool Xe_Client::backupset_list()
 
     std::cout << "============ backup sets ============" << std::endl;
     for (const auto& b : root["sets"]) {
-        std::cout << "  set_id: " << b["set_id"].asString() << std::endl;
+        std::cout << "  set_id: " << b["set_id"].asString() << ", type: " << b["type"].asString() << std::endl;
     }
     std::cout << "=====================================" << std::endl;
+    return true;
+}
+
+void Xe_Client::update_backup_set(const std::vector<struct backup_set>& bsets)
+{
+    Json::Value root;
+    Json::Value sets(Json::arrayValue);
+    for (const auto& b : bsets) {
+        Json::Value s;
+        s["set_id"] = b.vm_name;
+        s["type"] = b.type;
+        s["vm_uuid"] = b.vm_uuid;
+        s["date"] = b.date;
+        sets.append(s);
+    }
+    root["sets"] = sets;
+
+    std::ofstream out(BACKUP_SET_CONF);
+    out << root;
+    out.close();
+}
+
+bool Xe_Client::rm_backupset(const std::string& set_id)
+{
+    std::vector<struct backup_set> sets;
+    if (!load_backup_sets(sets)) {
+        std::cout << "Failed to get backup sets" << std::endl;
+        return false;
+    }
+
+    if (set_id == "all") {
+        for (const auto& s : sets) {
+            try {
+                if (std::filesystem::is_directory(s.vm_name)) {
+                    std::filesystem::remove_all(s.vm_name);
+                }
+            } catch (const std::exception& ex) {
+                std::cerr << "err: " << ex.what() << std::endl;
+            }
+        }
+
+        sets.clear();
+        update_backup_set(sets);
+    } else {
+
+    }
+
     return true;
 }
 
@@ -891,14 +1144,59 @@ bool Xe_Client::load_vm_meta(const std::string& file, struct vm &vm)
     }
 
     vm.uuid = root["vm"]["uuid"].asString();
+
+    for (const auto& op : root["vm"]["allowed_operations"]) {
+        vm.allowed_operations.emplace_back(op.asInt());
+    }
+
     vm.name_label = root["vm"]["name_label"].asString();
     vm.name_description = root["vm"]["name_description"].asString();
+    vm.power_state = root["vm"]["power_state"].asInt();
+    vm.memory_static_max = root["vm"]["memory_static_max"].asInt64();
+    vm.memory_dynamic_max = root["vm"]["memory_dynamic_max"].asInt64();
+    vm.memory_dynamic_min = root["vm"]["memory_dynamic_min"].asInt64();
+    vm.memory_static_min = root["vm"]["memory_static_min"].asInt64();
+
+    for (const auto& h : root["vm"]["vcpus_params"]) {
+        vm.vcpus_params.emplace(h["key"].asString(), h["value"].asString());
+    }
+
+    vm.vcpus_max = root["vm"]["vcpus_max"].asInt64();
+    vm.vcpus_at_startup = root["vm"]["vcpus_at_startup"].asInt64();
+    vm.actions_after_shutdown = root["vm"]["actions_after_shutdown"].asInt64();
+    vm.actions_after_reboot = root["vm"]["actions_after_reboot"].asInt64();
+    vm.actions_after_crash = root["vm"]["actions_after_crash"].asInt64();
+
+    vm.pv_bootloader = root["vm"]["pv_bootloader"].asString();
+    vm.pv_kernel = root["vm"]["pv_kernel"].asString();
+    vm.pv_ramdisk = root["vm"]["pv_ramdisk"].asString();
+    vm.pv_args = root["vm"]["pv_args"].asString();
+    vm.pv_bootloader_args = root["vm"]["pv_bootloader_args"].asString();
+    vm.pv_legacy_args = root["vm"]["pv_legacy_args"].asString();
+    vm.hvm_boot_policy = root["vm"]["hvm_boot_policy"].asString();
+
+    for (const auto& h : root["vm"]["hvm_boot_params"]) {
+        vm.hvm_boot_params.emplace(h["key"].asString(), h["value"].asString());
+    }
+
+    vm.hvm_shadow_multiplier = root["vm"]["hvm_shadow_multiplier"].asDouble();
+
+    for (const auto& p : root["vm"]["platform"]) {
+        vm.platform.emplace(p["key"].asString(), p["value"].asString());
+    }
+
+    for (const auto& h : root["vm"]["other_config"]) {
+        vm.other_config.emplace(h["key"].asString(), h["value"].asString());
+    }
 
     for (const auto& vbd : root["vm"]["vbds"]) {
         struct vbd vb;
         vb.uuid = vbd["uuid"].asString();
         vb.bootable = vbd["bootable"].asBool();
+        vb.device = vbd["device"].asString();
+        vb.userdevice = vbd["userdevice"].asString();
         vb.vdi.uuid = vbd["vdi"]["uuid"].asString();
+        vb.vdi.vdi = vbd["vdi"]["vdi"].asString();
         vb.vdi.name_label = vbd["vdi"]["name_label"].asString();
         vb.vdi.name_description = vbd["vdi"]["name_description"].asString();
         vb.vdi.physical_utilisation = vbd["vdi"]["physical_utilisation"].asInt64();
@@ -913,7 +1211,130 @@ bool Xe_Client::load_vm_meta(const std::string& file, struct vm &vm)
     return true;
 }
 
-bool Xe_Client::create_new_vm(std::string& vm_uuid)
+bool Xe_Client::create_new_vm_by_meta(std::string& vm_uuid, const struct vm& v)
+{
+    xen_vm_record *record = xen_vm_record_alloc();
+
+    record->allowed_operations = xen_vm_operations_set_alloc(v.allowed_operations.size());
+    record->allowed_operations->size = 0;
+    for (const auto& op : v.allowed_operations) {
+        record->allowed_operations->contents[record->allowed_operations->size++] = (xen_vm_operations)op;
+    }
+
+    //record->name_label = strdup(v.name_label.c_str());
+    std::string name = "testvm2";
+    record->name_label = strdup(name.c_str());
+    record->name_description = strdup(v.name_description.c_str());
+    record->user_version = v.user_version;
+    record->is_a_template = false;
+    record->memory_overhead = v.memory_overhead;
+    record->memory_target = v.memory_target;
+    record->memory_static_max = v.memory_static_max;
+    record->memory_static_min = v.memory_static_min;
+    record->memory_dynamic_max = v.memory_dynamic_max;
+    record->memory_dynamic_min = v.memory_dynamic_min;
+
+    record->vcpus_params = xen_string_string_map_alloc(v.vcpus_params.size());
+    record->vcpus_params->size = 0;
+    for (const auto& vc : v.vcpus_params) {
+        record->vcpus_params->contents[record->vcpus_params->size].key = strdup(vc.first.c_str());
+        record->vcpus_params->contents[record->vcpus_params->size++].val = strdup(vc.second.c_str());
+    }
+
+    record->vcpus_max = v.vcpus_max;
+    record->vcpus_at_startup = v.vcpus_at_startup;
+    record->actions_after_shutdown = (xen_on_normal_exit)v.actions_after_shutdown;
+    record->actions_after_reboot = (xen_on_normal_exit)v.actions_after_reboot;
+    record->actions_after_crash = (xen_on_crash_behaviour)v.actions_after_crash;
+
+    record->pv_bootloader = strdup(v.pv_bootloader.c_str());
+    record->pv_kernel = strdup(v.pv_kernel.c_str());
+    record->pv_ramdisk = strdup(v.pv_ramdisk.c_str());
+    record->pv_args = strdup(v.pv_args.c_str());
+    record->pv_bootloader_args = strdup(v.pv_bootloader_args.c_str());
+    record->pv_legacy_args = strdup(v.pv_legacy_args.c_str());
+    record->hvm_boot_policy = strdup(v.hvm_boot_policy.c_str());
+
+    record->hvm_boot_params = xen_string_string_map_alloc(v.hvm_boot_params.size());
+    record->hvm_boot_params->size = 0;
+    for (const auto& op : v.hvm_boot_params) {
+        record->hvm_boot_params->contents[record->hvm_boot_params->size].key = strdup(op.first.c_str());
+        record->hvm_boot_params->contents[record->hvm_boot_params->size++].val = strdup(op.second.c_str());
+    }
+
+    record->hvm_shadow_multiplier = v.hvm_shadow_multiplier;
+
+    record->platform = xen_string_string_map_alloc(v.platform.size());
+    record->platform->size = 0;
+    for (const auto& op : v.platform) {
+        record->platform->contents[record->platform->size].key = strdup(op.first.c_str());
+        record->platform->contents[record->platform->size++].val = strdup(op.second.c_str());
+        std::cout << "platform key: " << op.first << " val: " << op.second << std::endl;
+    }
+
+    record->other_config = xen_string_string_map_alloc(v.other_config.size());
+    record->other_config->size = 0;
+    for (const auto& op : v.other_config) {
+        record->other_config->contents[record->other_config->size].key = strdup(op.first.c_str());
+        record->other_config->contents[record->other_config->size++].val = strdup(op.second.c_str());
+    }
+
+    record->is_a_snapshot = false;
+
+    xen_vm vm = NULL;
+    xen_vm_create(session_, &vm, record);
+    if ((!session_->ok) || (vm == nullptr)) {
+        std::cout << "Failed to create vm" << std::endl;
+        print_error(session_);
+        xen_vm_record_free(record);
+        return false;
+    }
+
+    char *vm_id;
+
+    if (!xen_vm_get_uuid(session_, &vm_id, vm)) {
+        std::cout << "Failed to get vm uuid" << std::endl;
+        xen_vm_record_free(record);
+        return false;
+    }
+
+    vm_uuid = vm_id;
+    xen_uuid_free(vm_id);
+
+    struct vm v2;
+    if (!get_vm(vm, v2)) {
+        std::cout << "Failed to get vm" << std::endl;
+        xen_vm_record_free(record);
+        return false;
+    }
+
+    dump_vm(v2);
+
+    xen_vm_record_free(record);
+    return true;
+}
+
+bool Xe_Client::create_new_vm(const std::string& set_id, std::string& vm_uuid, struct vm& v, bool template_flag)
+{
+    std::string meta_file = set_id + "/" + VM_META_CONF;
+    if (!load_vm_meta(meta_file, v)) {
+        std::cout << "Failed to load vm meta from " << meta_file << std::endl;
+        return false;
+    }
+
+    if (template_flag) {
+        return create_new_vm_by_template(vm_uuid);
+    }
+
+    if (!create_new_vm_by_meta(vm_uuid, v)) {
+        std::cout << "Failed to create vm by meta" << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+bool Xe_Client::create_new_vm_by_template(std::string& vm_uuid)
 {
     std::string temp = "CentOS 7";
     struct xen_vm_set *vms = nullptr;
@@ -979,10 +1400,59 @@ bool Xe_Client::create_new_vm(std::string& vm_uuid)
     return true;
 }
 
-bool Xe_Client::restore_vm_i(const std::string& set_id, const std::string& sr_uuid, const struct vm& v)
+bool Xe_Client::restore_vm_diff(const std::string& set_id, const std::string& sr_uuid, const std::string& vm_uuid)
 {
+    // load diff vm info
+    std::string meta_file = set_id + "/" + VM_META_CONF;
+    struct vm diff_v;
+    if (!load_vm_meta(meta_file, diff_v)) {
+        std::cout << "Failed to load vm meta from " << meta_file << std::endl;
+        return false;
+    }
+
+    xen_vm vm;
+    if (!xen_vm_get_by_uuid(session_, &vm, (char*)vm_uuid.c_str())) {
+        std::cout << "Failed to get vm by " << vm_uuid << std::endl;
+        return false;
+    }
+
+    struct vm full_v;
+    if (!get_vm(vm, full_v)) {
+        std::cout << "Failed to get vm" << std::endl;
+    }
+    xen_vm_free(vm);
+
+    for (const auto& vb : diff_v.vbds) {
+        std::string vdi = find_basevdi_by_userdevice(full_v, vb.userdevice);
+        if (vdi.empty()) {
+            std::cout << "Failed to find base vdi by userdevice " << vb.userdevice << std::endl;
+            return false;
+        }
+
+        xen_task task = nullptr;
+        std::string task_name("import_raw_vdi");
+        if (!xen_task_create(session_, &task, (char*)task_name.c_str(),
+                             const_cast<char *>("task"))) {
+            std::cout << "Failed to create task" << std::endl;
+            return false;
+        }
+
+        std::string url = import_url(task, vdi);
+        std::string file = set_id + "/" + vb.vdi.uuid + ".vhd";
+        std::thread t(&Xe_Client::http_upload, this, url, file);
+        progress(task);
+        t.join();
+    }
+
+    return true;
+}
+
+bool Xe_Client::restore_vm_full(const std::string& set_id, const std::string& sr_uuid, std::string& vm_uuid)
+{
+    bool template_flag = false;
     std::string new_vm_uuid;
-    if (!create_new_vm(new_vm_uuid)) {
+    struct vm v;
+    if (!create_new_vm(set_id, new_vm_uuid, v, template_flag)) {
         std::cout << "Failed to create new vm" << std::endl;
         return false;
     }
@@ -1014,7 +1484,7 @@ bool Xe_Client::restore_vm_i(const std::string& set_id, const std::string& sr_uu
         vdi0_record->read_only = vb.vdi.read_only;
         vdi0_record->other_config = other_config;
 
-        xen_vbd vdi0 = nullptr;
+        xen_vdi vdi0 = nullptr;
         if (!xen_vdi_create(session_, &vdi0, vdi0_record)) {
             std::cout << "Failed to create vdi0" << std::endl;
             xen_vdi_record_free(vdi0_record);
@@ -1030,7 +1500,6 @@ bool Xe_Client::restore_vm_i(const std::string& set_id, const std::string& sr_uu
             return false;
         }
 
-        char* device_str =nullptr;
         xen_vm_record_opt* vm_record_opt = xen_vm_record_opt_alloc();
         vm_record_opt->is_record = false;
         vm_record_opt->u.handle = new_vm2;
@@ -1039,22 +1508,20 @@ bool Xe_Client::restore_vm_i(const std::string& set_id, const std::string& sr_uu
         vdi0_record_opt->is_record = false;
         vdi0_record_opt->u.handle = vdi0;
 
-        device_str = (char*)malloc(5);
-        strcpy(device_str, "xvda");
-
         xen_string_string_map* qos_algorithm_params = xen_string_string_map_alloc(0);
         xen_string_string_map* vbd_other_config = xen_string_string_map_alloc(0);
         xen_vbd_record *vbd0_record = xen_vbd_record_alloc();
         vbd0_record->vm = vm_record_opt;
         vbd0_record->vdi = vdi0_record_opt;
-        vbd0_record->userdevice = device_str;
+        vbd0_record->userdevice = strdup(vb.userdevice.c_str());
+        vbd0_record->device = strdup(vb.device.c_str());
         vbd0_record->type = vbd_type_disk;
         vbd0_record->mode = XEN_VBD_MODE_RW;
         vbd0_record->qos_algorithm_params = qos_algorithm_params;
         vbd0_record->other_config = vbd_other_config;
         vbd0_record->bootable = true;
 
-        xen_vdi vbd0 = nullptr;
+        xen_vbd vbd0 = nullptr;
         if (!xen_vbd_create(session_, &vbd0, vbd0_record)) {
             std::cout << "Failed to create vbd0" << std::endl;
             xen_vbd_record_free(vbd0_record);
@@ -1064,13 +1531,13 @@ bool Xe_Client::restore_vm_i(const std::string& set_id, const std::string& sr_uu
         xen_task task = nullptr;
         std::string task_name("import_raw_vdi");
         if (!xen_task_create(session_, &task, (char*)task_name.c_str(),
-                                const_cast<char *>("task"))) {
+                             const_cast<char *>("task"))) {
             std::cout << "Failed to create task" << std::endl;
             xen_vbd_record_free(vbd0_record);
             return false;
         }
 
-        std::string url = import_url(task, vdi0);
+        std::string url = import_url(task, (char*)vdi0);
         std::string file = set_id + "/" + vb.vdi.uuid + ".vhd";
         std::thread t(&Xe_Client::http_upload, this, url, file);
         progress(task);
@@ -1079,11 +1546,101 @@ bool Xe_Client::restore_vm_i(const std::string& set_id, const std::string& sr_uu
         xen_vbd_record_free(vbd0_record);
     }
 
-    xen_vm new_vm3;
-    if (!xen_vm_get_by_uuid(session_, &new_vm3, (char*)new_vm_uuid.c_str())) {
-        std::cout << "Failed to get vm by " << new_vm_uuid << std::endl;
+    if (template_flag) {
+        xen_vm new_vm;
+        if (!xen_vm_get_by_uuid(session_, &new_vm, (char*)new_vm_uuid.c_str())) {
+            std::cout << "Failed to get vm by " << new_vm_uuid << std::endl;
+            return false;
+        }
+
+        if (!xen_vm_provision(session_, new_vm)) {
+            std::cout << "Failed to provision vm " << new_vm_uuid << std::endl;
+            xen_session_clear_error(session_);
+        }
+    }
+    vm_uuid = std::move(new_vm_uuid);
+
+    return true;
+}
+
+std::string Xe_Client::find_basevdi_by_userdevice(const struct vm& v, const std::string& userdevice)
+{
+    dump_vm(v);
+    std::string vdi;
+    auto it = std::find_if(v.vbds.begin(), v.vbds.end(), [&userdevice](const struct vbd& vb) {
+        return vb.userdevice == userdevice;
+    });
+
+    if (it != v.vbds.end()) {
+        vdi = it->vdi.vdi;
+    }
+
+    return vdi;
+}
+
+bool Xe_Client::delete_snapshot(xen_vm vm)
+{
+    xen_vbd_set *vbd_set = nullptr;
+    if (!xen_vm_get_vbds(session_, &vbd_set, vm)) {
+        std::cout << "Failed to get vbds of snapshot" << std::endl;
+    }
+
+    if (!vbd_set) {
+        std::cout << "vbd_set is null" << std::endl;
         return false;
     }
-    xen_vm_provision(session_, new_vm3);
+
+    for (int i = 0; i < vbd_set->size; ++i) {
+        xen_vbd vbd = vbd_set->contents[i];
+        xen_vbd_record *vbd_record = nullptr;
+        if (!xen_vbd_get_record(session_, &vbd_record, vbd)) {
+            print_error(session_);
+            std::cout << "Failed to get vbd record" << std::endl;
+            xen_vbd_set_free(vbd_set);
+            return false;
+        }
+
+        if (vbd_record->type != XEN_VBD_TYPE_DISK) {
+            xen_vbd_record_free(vbd_record);
+            continue;
+        }
+        xen_vbd_record_free(vbd_record);
+
+        xen_vdi vdi = nullptr;
+        if (!xen_vbd_get_vdi(session_, &vdi, vbd)) {
+            std::cout << "Failed to get vdi by vbd" << std::endl;
+            xen_vbd_set_free(vbd_set);
+            return false;
+        }
+
+        if (!vdi) {
+            std::cout << "vdi is null" << std::endl;
+            xen_vbd_set_free(vbd_set);
+            return false;
+        }
+
+        if (!xen_vbd_destroy(session_, vbd)) {
+            std::cout << "Failed to destroy vbd" << std::endl;
+            xen_vdi_free(vdi);
+            xen_vbd_set_free(vbd_set);
+            return false;
+        }
+
+        if (!xen_vdi_destroy(session_, vdi)) {
+            std::cout << "Failed to destroy vdi" << std::endl;
+            xen_vdi_free(vdi);
+            xen_vbd_set_free(vbd_set);
+            return false;
+        }
+
+        xen_vdi_free(vdi);
+    }
+
+    if (!xen_vm_destroy(session_, vm)) {
+        std::cout << "Failed to destroy snapshot" << std::endl;
+        return false;
+    }
+
+    xen_vbd_set_free(vbd_set);
     return true;
 }

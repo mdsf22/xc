@@ -46,6 +46,16 @@ void backup_vm(const struct args& args, const std::string& vm_uuid)
     c.backup_vm(vm_uuid, "/root/backup");
 }
 
+void backup_vm_diff(const struct args& args, const std::string& vm_uuid)
+{
+    Xe_Client c(args.url, args.username, args.password);
+    c.connect();
+    // c.scan_hosts();
+    // c.scan_vms();
+
+    c.backup_vm_diff(vm_uuid, "/root/backup");
+}
+
 void restore_vm(
     const struct args& args,
     const std::string& sr_uuid,
@@ -66,8 +76,13 @@ void dump_srs(const struct args& args)
 void dump_backupsets(const struct args& args)
 {
     Xe_Client c(args.url, args.username, args.password);
-    c.connect();
     c.backupset_list();
+}
+
+void rm_backup_set(const struct args& args, const std::string& set_id)
+{
+    Xe_Client c(args.url, args.username, args.password);
+    c.rm_backupset(set_id);
 }
 
 void usage()
@@ -76,9 +91,11 @@ void usage()
     std::cout << "   all: list all vms and hosts and srs" << std::endl;
     std::cout << "   vms: list hosts and vms" << std::endl;
     std::cout << "   backup <vm_uuid>: backup vm by uuid" << std::endl;
-    std::cout << "   restore <set_id> <sr_uuid>: backup vm by uuid" << std::endl;
+    std::cout << "   backup_diff <vm_uuid>: backup diff vm by uuid" << std::endl;
+    std::cout << "   restore <set_id> <sr_uuid>: restore vm from set_id to sr_uuid" << std::endl;
     std::cout << "   srs: list storage repository" << std::endl;
     std::cout << "   sets: list backupset" << std::endl;
+    std::cout << "   rm <set_id>: remove backupset, if set_id is all, rm all" << std::endl;
 }
 
 bool parse_config(struct args& args)
@@ -127,6 +144,11 @@ int main(int argc, char*argv[])
                     backup_vm(args, argv[2]);
                     return 0;
                 }
+            } else if (strcmp(argv[i], "backup_diff") == 0) {
+                if (argc == 3) {
+                    backup_vm_diff(args, argv[2]);
+                    return 0;
+                }
             } else if (strcmp(argv[i], "srs") == 0) {
                 dump_srs(args);
                 return 0;
@@ -139,6 +161,11 @@ int main(int argc, char*argv[])
             } else if (strcmp(argv[i], "restore") == 0) {
                 if (argc == 4) {
                     restore_vm(args, argv[2], argv[3]);
+                    return 0;
+                }
+            } else if (strcmp(argv[i], "rm") == 0) {
+                if (argc == 3) {
+                    rm_backup_set(args, argv[2]);
                     return 0;
                 }
             }
