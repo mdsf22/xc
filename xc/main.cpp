@@ -1,9 +1,8 @@
 #include "xe_client.h"
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 #include <json/json.h>
-
-#define NFS_SR_UUID "598dd7e1-65a0-4554-875c-27a4ed2d24b5"
 
 extern "C"
 {
@@ -43,7 +42,7 @@ void backup_vm(const struct args& args, const std::string& vm_uuid)
     // c.scan_hosts();
     // c.scan_vms();
 
-    c.backup_vm(vm_uuid, "/root/backup");
+    c.backup_vm(vm_uuid, args.storage_dir);
 }
 
 void backup_vm_diff(const struct args& args, const std::string& vm_uuid)
@@ -53,17 +52,16 @@ void backup_vm_diff(const struct args& args, const std::string& vm_uuid)
     // c.scan_hosts();
     // c.scan_vms();
 
-    c.backup_vm_diff(vm_uuid, "/root/backup");
+    c.backup_vm_diff(vm_uuid, args.storage_dir);
 }
 
-void restore_vm(
-    const struct args& args,
-    const std::string& sr_uuid,
-    const std::string& set_id)
+void restore_vm(const struct args& args,
+                const std::string& sr_uuid,
+                const std::string& set_id)
 {
     Xe_Client c(args.url, args.username, args.password);
     c.connect();
-    c.restore_vm(sr_uuid, set_id);
+    c.restore_vm(args.storage_dir, sr_uuid, set_id);
 }
 
 void dump_srs(const struct args& args)
@@ -89,7 +87,7 @@ void dump_host_networks(const struct args& args)
 void rm_backup_set(const struct args& args, const std::string& set_id)
 {
     Xe_Client c(args.url, args.username, args.password);
-    c.rm_backupset(set_id);
+    c.rm_backupset(args.storage_dir, set_id);
 }
 
 void usage()
@@ -140,6 +138,10 @@ int main(int argc, char*argv[])
     if (!parse_config(args)) {
         std::cout << "Failed to parse config file" << std::endl;
         return 0;
+    }
+
+    if (!std::filesystem::is_directory(args.storage_dir)) {
+        std::filesystem::create_directory(args.storage_dir);
     }
 
     for (int i = 0; i < argc; i++) {

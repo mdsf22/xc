@@ -129,16 +129,18 @@ public:
     bool scan_networks();
 
     bool backup_vm(const std::string &vm_uuid, const std::string &backup_dir);
-    bool backup_vm_diff(const std::string &vm_uuid, const std::string &backup_dir);
+    bool backup_vm_diff(const std::string &backup_dir, const std::string &vm_uuid);
 
-    bool restore_vm(const std::string& set_id, const std::string& sr_uuid);
+    bool restore_vm(const std::string& storage_dir,
+                    const std::string& set_id,
+                    const std::string& sr_uuid);
 
     bool backupset_list();
 
     bool dump();
     bool write_to_json();
 
-    bool rm_backupset(const std::string& set_id);
+    bool rm_backupset(const std::string& backup_dir, const std::string& set_id);
 private:
     bool get_vm(xen_vm x_vm, struct vm& vm, bool snapshot = false);
     std::string export_url(xen_task task,
@@ -158,15 +160,25 @@ private:
     void http_download(const std::string &url, const std::string &file);
     void http_upload(const std::string &url, const std::string &file);
 
-    bool restore_vm_full(const std::string& set_id, const std::string& sr_uuid, std::string& vm_uuid);
-    bool restore_vm_diff(const std::string& set_id, const std::string& sr_uuid, const std::string& vm_uuid);
+    bool restore_vm_full(const std::string& storage_dir,
+                         const std::string& set_id,
+                         const std::string& sr_uuid,
+                         std::string& vm_uuid);
+    bool restore_vm_diff(const std::string& storage_dir,
+                         const std::string& set_id,
+                         const std::string& sr_uuid,
+                         const std::string& vm_uuid);
 
     bool add_backup_set(const struct backup_set &bset);
     bool load_backup_sets(std::vector<struct backup_set>& bsets);
-    bool add_vm_meta(const struct backup_set &bset);
+    bool add_vm_meta(const std::string& dir, const struct backup_set &bset);
 
     bool get_vbds(struct vm &v, xen_vm_record *vm_record);
-    bool create_new_vm(const std::string& set_id, std::string& vm_uuid, struct vm& v, bool template_flag = true);
+    bool create_new_vm(const std::string& storage_dir,
+                       const std::string& set_id,
+                       std::string& vm_uuid,
+                       struct vm& v,
+                       bool template_flag = true);
     bool create_new_vm_by_meta(std::string& vm_uuid, const struct vm& v);
     bool create_new_vm_by_template(std::string& vm_uuid);
     void dump_vm(const struct vm& v);

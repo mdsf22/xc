@@ -637,7 +637,7 @@ bool Xe_Client::load_backup_sets(std::vector<struct backup_set>& bsets)
     return true;
 }
 
-bool Xe_Client::add_vm_meta(const struct backup_set &bset)
+bool Xe_Client::add_vm_meta(const std::string& dir, const struct backup_set &bset)
 {
     Json::Value root;
     root["date"] = bset.date;
@@ -761,16 +761,17 @@ bool Xe_Client::add_vm_meta(const struct backup_set &bset)
 
     root["vm"] = vm;
 
-
-    std::string file = bset.vm_name + "/" + VM_META_CONF;
-    std::ofstream output_file(file);
+    std::filesystem::path m(dir);
+    m /= (bset.vm_name + "/" + VM_META_CONF);
+    // std::string file = bset.vm_name + "/" + VM_META_CONF;
+    std::ofstream output_file(m.string());
     output_file << root;
     output_file.close();
 
     return true;
 }
 
-bool Xe_Client::backup_vm_diff(const std::string &vm_uuid, const std::string &backup_dir)
+bool Xe_Client::backup_vm_diff(const std::string &backup_dir, const std::string &vm_uuid)
 {
     std::vector<struct backup_set> sets;
     if (!load_backup_sets(sets)) {
@@ -791,10 +792,13 @@ bool Xe_Client::backup_vm_diff(const std::string &vm_uuid, const std::string &ba
     std::string set_id = it->vm_name;
     std::cout << "Found full backup set: " << set_id << std::endl;
 
-    std::string meta_file = set_id + "/" + VM_META_CONF;
+    std::filesystem::path m(backup_dir);
+    m /= (set_id + "/" + VM_META_CONF);
+    // std::string meta_file = set_id + "/" + VM_META_CONF;
+    std::cout << "=== " << m.string() << std::endl;
     struct vm v;
-    if (!load_vm_meta(meta_file, v)) {
-        std::cout << "Failed to load vm meta: " << meta_file << std::endl;
+    if (!load_vm_meta(m.string(), v)) {
+        std::cout << "Failed to load vm meta: " << m.string() << std::endl;
         return false;
     }
 
@@ -810,7 +814,7 @@ bool Xe_Client::backup_vm_diff(const std::string &vm_uuid, const std::string &ba
         return false;
     }
 
-    if (!add_vm_meta(bt)) {
+    if (!add_vm_meta(backup_dir, bt)) {
         std::cout << "Failed to add vm meta: " << vm_uuid << std::endl;
         return false;
     }
@@ -832,7 +836,7 @@ bool Xe_Client::backup_vm(const std::string &vm_uuid, const std::string &backup_
         return false;
     }
 
-    if (!add_vm_meta(bt)) {
+    if (!add_vm_meta(backup_dir, bt)) {
         std::cout << "Failed to add vm meta: " << vm_uuid << std::endl;
         return false;
     }
@@ -888,7 +892,7 @@ bool Xe_Client::backup_vm_i(const std::string &vm_uuid,
     v.name_label = name;
     v.name_description = desc;
 
-    mkdir(snap_name.c_str(), 0777);
+    // mkdir(snap_name.c_str(), 0777);
     bool ret = true;
     for (const auto &vb : v.vbds) {
         std::string basevdi;
@@ -910,9 +914,15 @@ bool Xe_Client::backup_vm_i(const std::string &vm_uuid,
             break;
         }
 
-        std::string file = snap_name + "/" + vb.vdi.uuid + ".vhd";
+        std::filesystem::path file(backup_dir);
+        file /= snap_name;
+        if (!std::filesystem::exists(file)) {
+            std::filesystem::create_directory(file);
+        }
+        file /= vb.vdi.uuid + ".vhd";
+
         std::string url = export_url(task, vb.vdi.vdi, basevdi);
-        std::thread t(&Xe_Client::http_download, this, url, file);
+        std::thread t(&Xe_Client::http_download, this, url, file.string());
         progress(task);
         t.join();
         xen_task_free(task);
@@ -1138,12 +1148,14 @@ bool Xe_Client::scan_networks()
         std::cout << "  MTU: " << network_record->mtu << std::endl;
         std::cout << "  managed " << network_record->managed << std::endl;
     }
-     std::cout << "======================================" << std::endl;
+    std::cout << "======================================" << std::endl;
 
     return true;
 }
 
-bool Xe_Client::restore_vm(const std::string& set_id, const std::string& sr_uuid)
+bool Xe_Client::restore_vm(const std::string& storage_dir,
+                           const std::string& set_id,
+                           const std::string& sr_uuid)
 {
     std::vector<struct backup_set> sets;
     if (!load_backup_sets(sets)) {
@@ -1164,7 +1176,7 @@ bool Xe_Client::restore_vm(const std::string& set_id, const std::string& sr_uuid
     std::string new_uuid;
     if (type == BACKUP_TYPE_FULL) {
         std::cout << "full_set_id: " << set_id << std::endl;
-        if (!restore_vm_full(set_id, sr_uuid, new_uuid)) {
+        if (!restore_vm_full(storage_dir, set_id, sr_uuid, new_uuid)) {
             std::cout << "Failed to restore vm " << set_id << std::endl;
             return false;
         }
@@ -1183,13 +1195,13 @@ bool Xe_Client::restore_vm(const std::string& set_id, const std::string& sr_uuid
 
         std::string full_set_id = it2->vm_name;
         std::cout << "full_set_id: " << full_set_id << std::endl;
-        if (!restore_vm_full(full_set_id, sr_uuid, new_uuid)) {
+        if (!restore_vm_full(storage_dir, full_set_id, sr_uuid, new_uuid)) {
             std::cout << "Failed to restore vm " << set_id << std::endl;
             return false;
         }
 
         std::cout << "==== start to restore diff set: " << set_id << std::endl;
-        if (!restore_vm_diff(set_id, sr_uuid, new_uuid)) {
+        if (!restore_vm_diff(storage_dir, set_id, sr_uuid, new_uuid)) {
             std::cout << "Failed to restore vm " << set_id << std::endl;
             return false;
         }
@@ -1239,7 +1251,7 @@ void Xe_Client::update_backup_set(const std::vector<struct backup_set>& bsets)
     out.close();
 }
 
-bool Xe_Client::rm_backupset(const std::string& set_id)
+bool Xe_Client::rm_backupset(const std::string& backup_dir, const std::string& set_id)
 {
     std::vector<struct backup_set> sets;
     if (!load_backup_sets(sets)) {
@@ -1247,11 +1259,14 @@ bool Xe_Client::rm_backupset(const std::string& set_id)
         return false;
     }
 
+    std::filesystem::path m;
     if (set_id == "all") {
         for (const auto& s : sets) {
             try {
-                if (std::filesystem::is_directory(s.vm_name)) {
-                    std::filesystem::remove_all(s.vm_name);
+                m.clear();
+                m /= (backup_dir + "/" + s.vm_name);
+                if (std::filesystem::is_directory(m)) {
+                    std::filesystem::remove_all(m);
                 }
             } catch (const std::exception& ex) {
                 std::cerr << "err: " << ex.what() << std::endl;
@@ -1260,8 +1275,6 @@ bool Xe_Client::rm_backupset(const std::string& set_id)
 
         sets.clear();
         update_backup_set(sets);
-    } else {
-
     }
 
     return true;
@@ -1451,16 +1464,22 @@ bool Xe_Client::create_new_vm_by_meta(std::string& vm_uuid, const struct vm& v)
     return true;
 }
 
-bool Xe_Client::create_new_vm(const std::string& set_id, std::string& vm_uuid, struct vm& v, bool template_flag)
+bool Xe_Client::create_new_vm(const std::string& storage_dir,
+                              const std::string& set_id,
+                              std::string& vm_uuid,
+                              struct vm& v,
+                              bool template_flag)
 {
-    std::string meta_file = set_id + "/" + VM_META_CONF;
-    if (!load_vm_meta(meta_file, v)) {
-        std::cout << "Failed to load vm meta from " << meta_file << std::endl;
-        return false;
-    }
-
     if (template_flag) {
         return create_new_vm_by_template(vm_uuid);
+    }
+
+    std::filesystem::path meta_file(storage_dir);
+    meta_file /= (set_id + "/" + VM_META_CONF);
+    // std::string meta_file = set_id + "/" + VM_META_CONF;
+    if (!load_vm_meta(meta_file.string(), v)) {
+        std::cout << "Failed to load vm meta from " << meta_file << std::endl;
+        return false;
     }
 
     if (!create_new_vm_by_meta(vm_uuid, v)) {
@@ -1537,12 +1556,16 @@ bool Xe_Client::create_new_vm_by_template(std::string& vm_uuid)
     return true;
 }
 
-bool Xe_Client::restore_vm_diff(const std::string& set_id, const std::string& sr_uuid, const std::string& vm_uuid)
+bool Xe_Client::restore_vm_diff(const std::string& storage_dir,
+                                const std::string& set_id,
+                                const std::string& sr_uuid,
+                                const std::string& vm_uuid)
 {
     // load diff vm info
-    std::string meta_file = set_id + "/" + VM_META_CONF;
+    std::filesystem::path meta_file(storage_dir);
+    meta_file /= (set_id + "/" + VM_META_CONF);
     struct vm diff_v;
-    if (!load_vm_meta(meta_file, diff_v)) {
+    if (!load_vm_meta(meta_file.string(), diff_v)) {
         std::cout << "Failed to load vm meta from " << meta_file << std::endl;
         return false;
     }
@@ -1575,8 +1598,10 @@ bool Xe_Client::restore_vm_diff(const std::string& set_id, const std::string& sr
         }
 
         std::string url = import_url(task, vdi);
-        std::string file = set_id + "/" + vb.vdi.uuid + ".vhd";
-        std::thread t(&Xe_Client::http_upload, this, url, file);
+
+        std::filesystem::path file(storage_dir);
+        file /= (set_id + "/" + vb.vdi.uuid + ".vhd");
+        std::thread t(&Xe_Client::http_upload, this, url, file.string());
         progress(task);
         t.join();
     }
@@ -1584,12 +1609,15 @@ bool Xe_Client::restore_vm_diff(const std::string& set_id, const std::string& sr
     return true;
 }
 
-bool Xe_Client::restore_vm_full(const std::string& set_id, const std::string& sr_uuid, std::string& vm_uuid)
+bool Xe_Client::restore_vm_full(const std::string& storage_dir,
+                                const std::string& set_id,
+                                const std::string& sr_uuid,
+                                std::string& vm_uuid)
 {
     bool template_flag = false;
     std::string new_vm_uuid;
     struct vm v;
-    if (!create_new_vm(set_id, new_vm_uuid, v, template_flag)) {
+    if (!create_new_vm(storage_dir, set_id, new_vm_uuid, v, template_flag)) {
         std::cout << "Failed to create new vm" << std::endl;
         return false;
     }
@@ -1675,8 +1703,11 @@ bool Xe_Client::restore_vm_full(const std::string& set_id, const std::string& sr
         }
 
         std::string url = import_url(task, (char*)vdi0);
-        std::string file = set_id + "/" + vb.vdi.uuid + ".vhd";
-        std::thread t(&Xe_Client::http_upload, this, url, file);
+
+        std::filesystem::path file(storage_dir);
+        file /= (set_id + "/" + vb.vdi.uuid + ".vhd");
+        //std::string file = set_id + "/" + vb.vdi.uuid + ".vhd";
+        std::thread t(&Xe_Client::http_upload, this, url, file.string());
         progress(task);
         t.join();
 
