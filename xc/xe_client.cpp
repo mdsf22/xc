@@ -154,9 +154,36 @@ bool Xe_Client::scan_hosts()
         h.uuid = host_record->uuid;
         h.address = host_record->address;
         h.host = host_record->hostname;
+        std::cout << "== host " << h.host << std::endl;
+        // scan pif
+        if (host_record->pifs)
+            scan_pif(host_record->pifs);
     }
 
     xen_host_set_free(hosts);
+    return true;
+}
+
+bool Xe_Client::scan_pif(struct xen_pif_record_opt_set *pifs)
+{
+    for (int i = 0; i < pifs->size; ++i) {
+        xen_pif_record_opt *opt = pifs->contents[i];
+        if (opt->is_record) {
+            continue;
+        }
+
+        xen_pif_record *pif_record = nullptr;
+        if (!xen_pif_get_record(session_, &pif_record, opt->u.handle)) {
+            return false;
+        } else {
+            // pif.IP = pif_record->IP;
+            // pif.netmask = pif_record->netmask;
+            // pif.gateway = pif_record->gateway;
+            std::cout << "== ip " << pif_record->ip << std::endl;
+            std::cout << "== device " << pif_record->device << std::endl;
+        }
+        xen_pif_record_free(pif_record);
+    }
     return true;
 }
 
@@ -519,7 +546,7 @@ bool Xe_Client::write_to_json()
              vm["actions_after_reboot"] = v.actions_after_reboot;
              vm["actions_after_crash"] = v.actions_after_crash;
 
-            Json::Value vdbs(Json::arrayValue);
+             Json::Value vdbs(Json::arrayValue);
              for (const auto& vb : v.vbds) {
                 Json::Value vdb;
                 Json::Value vdi;
@@ -789,12 +816,9 @@ bool Xe_Client::backup_vm_diff(const std::string &backup_dir, const std::string 
         return false;
     }
 
-    std::string set_id = it->vm_name;
+    const auto& set_id = it->vm_name;
     std::cout << "Found full backup set: " << set_id << std::endl;
-
-    std::filesystem::path m(backup_dir);
-    m /= (set_id + "/" + VM_META_CONF);
-    // std::string meta_file = set_id + "/" + VM_META_CONF;
+    std::filesystem::path m = std::filesystem::path(backup_dir) / set_id / VM_META_CONF;
     std::cout << "=== " << m.string() << std::endl;
     struct vm v;
     if (!load_vm_meta(m.string(), v)) {
@@ -844,6 +868,36 @@ bool Xe_Client::backup_vm(const std::string &vm_uuid, const std::string &backup_
     return true;
 }
 
+bool Xe_Client::pifs(std::vector<std::string>& ips, xen_host host)
+{
+    xen_pif_set *pif_set;
+    if (!xen_host_get_pifs(session_, &pif_set, host) || pif_set->size == 0) {
+        std::cout << "Failed to get pifs" << std::endl;
+        return false;
+    }
+
+    auto s = make_deleter(pif_set, [](xen_pif_set* s) {
+        xen_pif_set_free(s);
+    });
+
+    for (int i = 0; i < pif_set->size; i++) {
+        xen_pif_record *pif_record = nullptr;
+        if (!xen_pif_get_record(session_, &pif_record, pif_set->contents[i])) {
+            std::cout << "Failed to get pif record" << std::endl;
+            return false;
+        }
+
+        if (pif_record->currently_attached) {
+            std::cout << "ip: " << pif_record->ip << std::endl;
+            ips.emplace_back(pif_record->ip);
+        }
+
+        xen_pif_record_free(pif_record);
+    }
+
+    return true;
+}
+
 bool Xe_Client::backup_vm_i(const std::string &vm_uuid,
                             const std::string &backup_dir,
                             struct backup_set &bt,
@@ -864,12 +918,33 @@ bool Xe_Client::backup_vm_i(const std::string &vm_uuid,
 
     std::string name = vm_record->name_label;
     std::string desc = vm_record->name_description;
+
+    // choose pif to backup
+    std::vector<std::string> ips;
+    pifs(ips, vm_record->affinity->u.handle);
+
+    std::cout << "choose ip to backup: " << std::endl;
+    int index = 0;
+    for (const auto& ip : ips) {
+        std::cout << index++ << ": " << ip << std::endl;
+    }
+
+    char buf[10];
+    std::cin.getline(buf, 10);
+    int n = atoi(buf);
+    if (n < 0 || n >= ips.size()) {
+        std::cout << "Invalid input" << std::endl;
+        return false;
+    }
+    const std::string& host_ip = ips[n];
+    std::cout << "== host ip: " << host_ip << std::endl;
+
     xen_vm_record_free(vm_record);
 
-    std::string cur_date = current_time_str();
+    const auto& cur_date = current_time_str();
     bt.date = cur_date;
     bt.type = BACKUP_TYPE_FULL;
-    std::string snap_name = vm_uuid + "_" + cur_date;
+    const auto& snap_name = vm_uuid + "_" + cur_date;
     std::cout << "snap_name: " << snap_name << std::endl;
     bt.vm_name = snap_name;
     bt.vm_uuid = vm_uuid;
@@ -921,7 +996,7 @@ bool Xe_Client::backup_vm_i(const std::string &vm_uuid,
         }
         file /= vb.vdi.uuid + ".vhd";
 
-        std::string url = export_url(task, vb.vdi.vdi, basevdi);
+        const auto& url = export_url(host_ip, task, vb.vdi.vdi, basevdi);
         std::thread t(&Xe_Client::http_download, this, url, file.string());
         progress(task);
         t.join();
@@ -1023,11 +1098,13 @@ void Xe_Client::progress(xen_task task)
     return;
 }
 
-std::string Xe_Client::export_url(xen_task task,
+std::string Xe_Client::export_url(const std::string& host,
+                                  xen_task task,
                                   const std::string& vdi,
                                   const std::string& base)
 {
-    std::string url = host_;
+    // std::string url = "http://172.16.2.163";
+    std::string url = host;
     url.append("/export_raw_vdi?session_id=");
     url.append(session_->session_id);
     url.append("&task_id=");

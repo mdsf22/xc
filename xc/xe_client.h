@@ -143,7 +143,8 @@ public:
     bool rm_backupset(const std::string& backup_dir, const std::string& set_id);
 private:
     bool get_vm(xen_vm x_vm, struct vm& vm, bool snapshot = false);
-    std::string export_url(xen_task task,
+    std::string export_url(const std::string& host,
+                           xen_task task,
                            const std::string& vdi,
                            const std::string& base);
     bool get_vifs(xen_vm x_vm, std::vector<struct vif>& vifs);
@@ -188,6 +189,9 @@ private:
     std::string find_basevdi_by_userdevice(const struct vm& v, const std::string& userdevice);
     void update_backup_set(const std::vector<struct backup_set>& bsets);
     bool delete_snapshot(xen_vm vm);
+
+    bool scan_pif(struct xen_pif_record_opt_set *pifs);
+    bool pifs(std::vector<std::string>& pifs, xen_host host);
 private:
     xen_session* session_;
     std::string host_;
