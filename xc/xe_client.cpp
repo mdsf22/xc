@@ -136,21 +136,21 @@ bool Xe_Client::connect()
     return session_->ok;
 }
 
-bool Xe_Client::scan_hosts()
+bool Xe_Client::hosts(std::map<std::string, struct host> &hosts)
 {
-    xen_host_set *hosts = nullptr;
-    if (!xen_host_get_all(session_, &hosts))
+    xen_host_set *host_set = nullptr;
+    if (!xen_host_get_all(session_, &host_set))
         return false;
 
-    for (int i = 0; i < hosts->size; ++i) {
-        xen_host host = hosts->contents[i];
+    for (int i = 0; i < host_set->size; ++i) {
+        xen_host host = host_set->contents[i];
         xen_host_record *host_record = nullptr;
         if (!xen_host_get_record(session_, &host_record, host)) {
-            xen_host_set_free(hosts);
+            xen_host_set_free(host_set);
             return false;
         }
 
-        struct host& h = hosts_[host_record->uuid];
+        struct host& h = hosts[host_record->uuid];
         h.uuid = host_record->uuid;
         h.address = host_record->address;
         h.host = host_record->hostname;
@@ -160,7 +160,7 @@ bool Xe_Client::scan_hosts()
             scan_pif(host_record->pifs);
     }
 
-    xen_host_set_free(hosts);
+    xen_host_set_free(host_set);
     return true;
 }
 
@@ -189,21 +189,39 @@ bool Xe_Client::scan_pif(struct xen_pif_record_opt_set *pifs)
 
 bool Xe_Client::scan_vms()
 {
-    struct xen_vm_set *vms = nullptr;
-    if (!xen_vm_get_all(session_, &vms))
+    hosts(hosts_);
+
+    std::vector<struct vm> vs;
+    vms(vs);
+    for (auto& v : vs) {
+        if (v.host_uuid.empty())
+            continue;
+
+        struct host& h = hosts_[v.host_uuid];
+        h.vms.push_back(v);
+    }
+
+    dump(hosts_);
+
+    return true;
+}
+
+bool Xe_Client::vms(std::vector<struct vm>& vms)
+{
+    struct xen_vm_set *vm_set = nullptr;
+    if (!xen_vm_get_all(session_, &vm_set))
         return false;
 
-    for (int i = 0; i < vms->size; ++i) {
-        xen_vm vm = vms->contents[i];
+    for (int i = 0; i < vm_set->size; ++i) {
+        xen_vm vm = vm_set->contents[i];
         struct vm v;
         if (!get_vm(vm, v))
             continue;
 
-        struct host& h = hosts_[v.host_uuid];
-        h.vms.push_back(std::move(v));
+        vms.emplace_back(std::move(v));
     }
 
-    xen_vm_set_free(vms);
+    xen_vm_set_free(vm_set);
     return true;
 }
 
@@ -253,6 +271,7 @@ bool Xe_Client::get_vifs(xen_vm vm, std::vector<struct vif>& vifs)
             .name_description = network_record->name_description,
             .mtu = network_record->mtu,
             .bridge = network_record->bridge,
+            .managed = network_record->managed
         };
 
         vif.network = std::move(network);
@@ -481,6 +500,20 @@ void Xe_Client::dump_vbd(const struct vbd& vb)
     std::cout << "            read_only: " << vb.vdi.read_only << std::endl;
 }
 
+void Xe_Client::dump_sr(const struct sr& sr)
+{
+    std::cout << "      uuid: " << sr.uuid << std::endl;
+    std::cout << "        name_label: " << sr.name_label << std::endl;
+    std::cout << "        name_description: " << sr.name_description << std::endl;
+    std::cout << "        type: " << sr.type << std::endl;
+    std::cout << "        physical_size: " << sr.physical_size << std::endl;
+}
+
+void Xe_Client::dump_backupset(const struct backup_set& b)
+{
+    std::cout << "  set_id: " << b.vm_name << ", type: " << b.type << std::endl;
+}
+
 void Xe_Client::dump_vif(const struct vif& vf)
 {
     std::cout << "      vif: " << vf.uuid << std::endl;
@@ -494,9 +527,9 @@ void Xe_Client::dump_vif(const struct vif& vf)
     std::cout << "          bridge: " << vf.network.bridge << std::endl;
 }
 
-bool Xe_Client::dump()
+bool Xe_Client::dump(const std::map<std::string, struct host>& hosts)
 {
-    for (const auto& h : hosts_) {
+    for (const auto& h : hosts) {
         std::cout << "host: " << h.second.uuid << std::endl;
         std::cout << "  address: " << h.second.address << std::endl;
         std::cout << "  hostname: " << h.second.host << std::endl;
@@ -920,24 +953,38 @@ bool Xe_Client::backup_vm_i(const std::string &vm_uuid,
     std::string desc = vm_record->name_description;
 
     // choose pif to backup
+    // first get from resident_on, if not, get from affinity
+    //     A VM's affinity host is its "preferred" host.XenServer interprets the "affinity" field as a preference
+    // for where to start/resume a VM for start/resume operations that don't specify a particular host.
+    // If you don't specify a particular host when starting a VM, then XenServer considers the affinity host first,
+    // and will start the VM on that host provided it is suitable.
+    //     XenServer only populates the "resident-on" field once you start a VM. It points to the actual host on
+    // which the VM is currently running
     std::vector<std::string> ips;
-    pifs(ips, vm_record->affinity->u.handle);
+    std::cout << "get pif from resident_on" << std::endl;
+    pifs(ips, vm_record->resident_on->u.handle);
+
+    if (ips.empty()) {
+        std::cout << "get pif from affinity" << std::endl;
+        pifs(ips, vm_record->affinity->u.handle);
+    }
 
     std::cout << "choose ip to backup: " << std::endl;
-    int index = 0;
-    for (const auto& ip : ips) {
-        std::cout << index++ << ": " << ip << std::endl;
+    for (int i = 0; i < ips.size(); i++) {
+        std::cout << i << ": " << ips[i] << std::endl;
     }
 
-    char buf[10];
-    std::cin.getline(buf, 10);
-    int n = atoi(buf);
-    if (n < 0 || n >= ips.size()) {
-        std::cout << "Invalid input" << std::endl;
+    std::string host_ip;
+    std::string input;
+    std::getline(std::cin, input);
+    try {
+        const int n = std::stoi(input);
+        host_ip = ips.at(n);
+        std::cout << "Selected IP: " << host_ip << std::endl;
+    } catch (std::exception& e) {
+        std::cout << "Invalid input: " << e.what() << std::endl;
         return false;
     }
-    const std::string& host_ip = ips[n];
-    std::cout << "== host ip: " << host_ip << std::endl;
 
     xen_vm_record_free(vm_record);
 
@@ -1103,7 +1150,6 @@ std::string Xe_Client::export_url(const std::string& host,
                                   const std::string& vdi,
                                   const std::string& base)
 {
-    // std::string url = "http://172.16.2.163";
     std::string url = host;
     url.append("/export_raw_vdi?session_id=");
     url.append(session_->session_id);
@@ -1139,6 +1185,17 @@ std::string Xe_Client::import_url(xen_task task, const std::string& vdi)
 
 bool Xe_Client::scan_srs()
 {
+    srs(srs_);
+    std::cout << "============ storage repository ============" << std::endl;
+    for (const auto& sr : srs_)
+        dump_sr(sr);
+
+    std::cout << "============================================" << std::endl;
+    return true;
+}
+
+bool Xe_Client::srs(std::vector<struct sr>& srs)
+{
     xen_sr_set* sr_set = nullptr;
     if (!xen_sr_get_all(session_, &sr_set)) {
         std::cout << "Failed to get sr set" << std::endl;
@@ -1151,7 +1208,6 @@ bool Xe_Client::scan_srs()
     }
 
     bool ret = true;
-    std::cout << "============ storage repository ============" << std::endl;
     for (int i = 0; i < sr_set->size; i++) {
         if (!sr_set->contents[i]) {
             continue;
@@ -1185,15 +1241,9 @@ bool Xe_Client::scan_srs()
             sr_record->physical_utilisation
         };
 
-        std::cout << "uuid: " << s.uuid << std::endl;
-        std::cout << "  name_label: " << s.name_label << std::endl;
-        std::cout << "  name_description: " << s.name_description << std::endl;
-        std::cout << "  type: " << s.type << std::endl;
-        std::cout << "  physical_size: " << s.physical_size << std::endl;
-        srs_.emplace_back(std::move(s));
+        srs.emplace_back(std::move(s));
         xen_sr_record_free(sr_record);
     }
-    std::cout << "============================================" << std::endl;
 out:
     if (sr_set) {
         xen_sr_set_free(sr_set);
@@ -1203,6 +1253,17 @@ out:
 }
 
 bool Xe_Client::scan_networks()
+{
+    std::vector<struct network> nts;
+    if (!networks(nts)) {
+        std::cout << "Failed to get networks" << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+bool Xe_Client::networks(std::vector<struct network>& networks)
 {
     xen_network_set* network_set = nullptr;
     if (!xen_network_get_all(session_, &network_set)) {
@@ -1224,6 +1285,15 @@ bool Xe_Client::scan_networks()
         std::cout << "  bridge: " << network_record->bridge << std::endl;
         std::cout << "  MTU: " << network_record->mtu << std::endl;
         std::cout << "  managed " << network_record->managed << std::endl;
+
+        networks.emplace_back(network {
+            network_record->uuid,
+            network_record->name_label,
+            network_record->name_description,
+            network_record->mtu,
+            network_record->bridge,
+            network_record->managed
+        });
     }
     std::cout << "======================================" << std::endl;
 
@@ -1231,8 +1301,7 @@ bool Xe_Client::scan_networks()
 }
 
 bool Xe_Client::restore_vm(const std::string& storage_dir,
-                           const std::string& set_id,
-                           const std::string& sr_uuid)
+                           const std::string& set_id)
 {
     std::vector<struct backup_set> sets;
     if (!load_backup_sets(sets)) {
@@ -1249,16 +1318,16 @@ bool Xe_Client::restore_vm(const std::string& storage_dir,
         return false;
     }
 
-    std::string type = it->type;
+    const auto& type = it->type;
     std::string new_uuid;
     if (type == BACKUP_TYPE_FULL) {
         std::cout << "full_set_id: " << set_id << std::endl;
-        if (!restore_vm_full(storage_dir, set_id, sr_uuid, new_uuid)) {
+        if (!restore_vm_full(storage_dir, set_id, new_uuid)) {
             std::cout << "Failed to restore vm " << set_id << std::endl;
             return false;
         }
     } else {
-        std::string vm_uuid = it->vm_uuid;
+        const auto& vm_uuid = it->vm_uuid;
 
         // diff restore, find the latest full backup set
         auto it2 = std::find_if(sets.rbegin(), sets.rend(), [&vm_uuid](const struct backup_set& bset) {
@@ -1270,15 +1339,15 @@ bool Xe_Client::restore_vm(const std::string& storage_dir,
             return false;
         }
 
-        std::string full_set_id = it2->vm_name;
+        const auto& full_set_id = it2->vm_name;
         std::cout << "full_set_id: " << full_set_id << std::endl;
-        if (!restore_vm_full(storage_dir, full_set_id, sr_uuid, new_uuid)) {
+        if (!restore_vm_full(storage_dir, full_set_id, new_uuid)) {
             std::cout << "Failed to restore vm " << set_id << std::endl;
             return false;
         }
 
         std::cout << "==== start to restore diff set: " << set_id << std::endl;
-        if (!restore_vm_diff(storage_dir, set_id, sr_uuid, new_uuid)) {
+        if (!restore_vm_diff(storage_dir, set_id, new_uuid)) {
             std::cout << "Failed to restore vm " << set_id << std::endl;
             return false;
         }
@@ -1287,7 +1356,27 @@ bool Xe_Client::restore_vm(const std::string& storage_dir,
     return true;
 }
 
-bool Xe_Client::backupset_list()
+bool Xe_Client::scan_backsets()
+{
+    std::vector<struct backup_set> bsets;
+    backupset_list(bsets);
+    std::cout << "============ backup sets ============" << std::endl;
+    for (const auto& b : bsets)
+        dump_backupset(b);
+    std::cout << "=====================================" << std::endl;
+    return true;
+}
+
+bool Xe_Client::scan_all()
+{
+    scan_vms();
+    scan_srs();
+    write_to_json();
+
+    return true;
+}
+
+bool Xe_Client::backupset_list(std::vector<struct backup_set>& bsets)
 {
     std::ifstream file(BACKUP_SET_CONF);
     Json::CharReaderBuilder reader;
@@ -1301,11 +1390,15 @@ bool Xe_Client::backupset_list()
     }
     file.close();
 
-    std::cout << "============ backup sets ============" << std::endl;
     for (const auto& b : root["sets"]) {
-        std::cout << "  set_id: " << b["set_id"].asString() << ", type: " << b["type"].asString() << std::endl;
+        bsets.emplace_back(backup_set {
+            b["set_id"].asString(),
+            b["vm_uuid"].asString(),
+            b["date"].asString(),
+            b["type"].asString()
+        });
     }
-    std::cout << "=====================================" << std::endl;
+
     return true;
 }
 
@@ -1433,6 +1526,23 @@ bool Xe_Client::load_vm_meta(const std::string& file, struct vm &vm)
         vb.vdi.read_only = vbd["vdi"]["read_only"].asBool();
 
         vm.vbds.emplace_back(std::move(vb));
+    }
+
+    for (const auto& vif : root["vm"]["vifs"]) {
+        struct vif vf {
+            vif["uuid"].asString(),
+            vif["device"].asString(),
+            vif["mac"].asString(),
+            vif["mtu"].asInt(),
+            {
+                vif["network"]["uuid"].asString(),
+                vif["network"]["name_label"].asString(),
+                vif["network"]["name_description"].asString(),
+                vif["network"]["mtu"].asInt(),
+                vif["network"]["bridge"].asString()
+            }
+        };
+        vm.vifs.emplace_back(std::move(vf));
     }
 
     return true;
@@ -1633,9 +1743,55 @@ bool Xe_Client::create_new_vm_by_template(std::string& vm_uuid)
     return true;
 }
 
+bool Xe_Client::restore_vif(const std::string& vm_uuid,
+                            const std::string& network_uuid,
+                            const struct vif& vif)
+{
+    xen_vm vm = nullptr;
+    if (!xen_vm_get_by_uuid(session_, &vm, (char *)vm_uuid.c_str()) || (vm == nullptr)) {
+        std::cout << "Failed to get vm by " << vm_uuid << std::endl;
+        return false;
+    }
+
+    xen_vm_record_opt *vm_opt = xen_vm_record_opt_alloc();
+    vm_opt->is_record = 0;
+    vm_opt->u.handle = vm;
+
+    xen_network network = nullptr;
+    if (!xen_network_get_by_uuid(session_, &network, (char*)network_uuid.c_str()) || (network == nullptr)) {
+        std::cout << "Failed to get network by " << network_uuid << std::endl;
+        return false;
+    }
+
+    xen_network_record_opt *network_record_opt = xen_network_record_opt_alloc();
+    network_record_opt->is_record = false;
+    network_record_opt->u.handle = network;
+
+    xen_vif_record *vif_record = xen_vif_record_alloc();
+    vif_record->mac = strdup(vif.mac.c_str());
+    vif_record->vm = vm_opt;
+    vif_record->network = network_record_opt;
+    vif_record->other_config = xen_string_string_map_alloc(0);
+    vif_record->runtime_properties = xen_string_string_map_alloc(0);
+    vif_record->qos_algorithm_params = xen_string_string_map_alloc(0);
+    vif_record->device = strdup(vif.device.c_str());
+    std::cout << "===> vif.device: " << vif.device << std::endl;
+    std::cout << "===> mac: " << vif.mac << std::endl;
+    xen_vif xvif = nullptr;
+    bool ret = true;
+    if (!xen_vif_create(session_, &xvif, vif_record) || (xvif == nullptr)) {
+        std::cout << "Failed to create vif" << std::endl;
+        ret = false;
+    } else {
+        xen_vif_free(xvif);
+    }
+
+    xen_vif_record_free(vif_record);
+    return ret;
+}
+
 bool Xe_Client::restore_vm_diff(const std::string& storage_dir,
                                 const std::string& set_id,
-                                const std::string& sr_uuid,
                                 const std::string& vm_uuid)
 {
     // load diff vm info
@@ -1686,22 +1842,14 @@ bool Xe_Client::restore_vm_diff(const std::string& storage_dir,
     return true;
 }
 
-bool Xe_Client::restore_vm_full(const std::string& storage_dir,
-                                const std::string& set_id,
-                                const std::string& sr_uuid,
-                                std::string& vm_uuid)
+bool Xe_Client::restore_vdi(const std::string& storage_dir,
+                            const std::string& set_id,
+                            const std::string& sr_uuid,
+                            const std::string& vm_uuid,
+                            std::vector<struct vbd>& vbds)
 {
-    bool template_flag = false;
-    std::string new_vm_uuid;
-    struct vm v;
-    if (!create_new_vm(storage_dir, set_id, new_vm_uuid, v, template_flag)) {
-        std::cout << "Failed to create new vm" << std::endl;
-        return false;
-    }
-
     enum xen_vbd_type vbd_type_disk = xen_vbd_type_from_string(session_, "Disk");
-
-    for (const auto& vb : v.vbds) {
+    for (const auto& vb : vbds) {
         // must in for loop,  sr will be free by xen_vdi_record_free
         xen_sr sr = nullptr;
         if (!xen_sr_get_by_uuid(session_, &sr, (char *)sr_uuid.c_str())) {
@@ -1736,9 +1884,9 @@ bool Xe_Client::restore_vm_full(const std::string& storage_dir,
 
         // must in for loop, xen_vm will be free by xen_vm_record_free every loop
         xen_vm new_vm2;
-        if (!xen_vm_get_by_uuid(session_, &new_vm2, (char*)new_vm_uuid.c_str())) {
+        if (!xen_vm_get_by_uuid(session_, &new_vm2, (char*)vm_uuid.c_str())) {
              xen_vdi_record_free(vdi0_record);
-            std::cout << "Failed to get vm by " << new_vm_uuid << std::endl;
+            std::cout << "Failed to get vm by " << vm_uuid << std::endl;
             return false;
         }
 
@@ -1783,12 +1931,79 @@ bool Xe_Client::restore_vm_full(const std::string& storage_dir,
 
         std::filesystem::path file(storage_dir);
         file /= (set_id + "/" + vb.vdi.uuid + ".vhd");
-        //std::string file = set_id + "/" + vb.vdi.uuid + ".vhd";
         std::thread t(&Xe_Client::http_upload, this, url, file.string());
         progress(task);
         t.join();
 
         xen_vbd_record_free(vbd0_record);
+    }
+
+    return true;
+}
+
+bool Xe_Client::restore_vm_full(const std::string& storage_dir,
+                                const std::string& set_id,
+                                std::string& vm_uuid)
+{
+    // choose storage
+    std::vector<struct sr> ss;
+    srs(ss);
+    std::cout << "Select Storage: " << std::endl;
+    for (int i = 0; i < ss.size(); i++) {
+        std::cout << i << ": " << "type " << ss[i].type << ", name_label: " << ss[i].name_label << std::endl;
+    }
+    std::string sr_uuid;
+    std::string input;
+    std::getline(std::cin, input);
+    try {
+        const int n = std::stoi(input);
+        sr_uuid = ss.at(n).uuid;
+        std::cout << "Selected Storage: " <<  sr_uuid << " " << ss.at(n).name_label << std::endl;
+    } catch (std::exception& e) {
+        std::cout << "Invalid input: " << e.what() << std::endl;
+        return false;
+    }
+
+    bool template_flag = false;
+    std::string new_vm_uuid;
+    struct vm v;
+    if (!create_new_vm(storage_dir, set_id, new_vm_uuid, v, template_flag)) {
+        std::cout << "Failed to create new vm" << std::endl;
+        return false;
+    }
+
+    if (!restore_vdi(storage_dir, set_id, sr_uuid, new_vm_uuid, v.vbds)) {
+        std::cout << "Failed to restore vdi" << std::endl;
+        return false;
+    }
+
+    std::string network_uuid;
+    std::vector<struct network> ns;
+    networks(ns);
+    for (const auto& vif : v.vifs) {
+        std::cout << "restore vif " << vif.device << std::endl;
+        // select network
+        std::cout << "Select Network: " << std::endl;
+        for (int i = 0; i < ns.size(); i++) {
+            std::cout << i << ": " << "name_label: " << ns[i].name_label << ",bridge: " << ns[i].bridge << std::endl;
+        }
+
+        input.clear();
+        std::getline(std::cin, input);
+        try {
+            const int n = std::stoi(input);
+            network_uuid = ns.at(n).uuid;
+            std::cout << "Selected Network uuid:" <<  network_uuid << ", name_label: "
+                      << ns.at(n).name_label << ", bridge: " << ns.at(n).bridge << std::endl;
+        } catch (std::exception& e) {
+            std::cout << "Invalid input: " << e.what() << std::endl;
+            return false;
+        }
+
+        if (!restore_vif(new_vm_uuid, network_uuid, vif)) {
+            std::cout << "Failed to restore vif" << std::endl;
+            return false;
+        }
     }
 
     if (template_flag) {
@@ -1810,7 +2025,7 @@ bool Xe_Client::restore_vm_full(const std::string& storage_dir,
 
 std::string Xe_Client::find_basevdi_by_userdevice(const struct vm& v, const std::string& userdevice)
 {
-    dump_vm(v);
+    //dump_vm(v);
     std::string vdi;
     auto it = std::find_if(v.vbds.begin(), v.vbds.end(), [&userdevice](const struct vbd& vb) {
         return vb.userdevice == userdevice;

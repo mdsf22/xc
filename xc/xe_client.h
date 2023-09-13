@@ -15,6 +15,7 @@ struct network {
     std::string name_description;
     int64_t mtu;
     std::string bridge;
+    bool managed;
 };
 
 struct vif {
@@ -120,28 +121,43 @@ public:
     ~Xe_Client();
 
     bool connect();
-
-    xen_session* get_session() const { return session_; }
-
-    bool scan_hosts();
     bool scan_vms();
     bool scan_srs();
     bool scan_networks();
+    bool scan_backsets();
+    bool scan_all();
 
     bool backup_vm(const std::string &vm_uuid, const std::string &backup_dir);
     bool backup_vm_diff(const std::string &backup_dir, const std::string &vm_uuid);
 
     bool restore_vm(const std::string& storage_dir,
-                    const std::string& set_id,
-                    const std::string& sr_uuid);
-
-    bool backupset_list();
-
-    bool dump();
-    bool write_to_json();
+                    const std::string& set_id);
 
     bool rm_backupset(const std::string& backup_dir, const std::string& set_id);
 private:
+    xen_session* get_session() const { return session_; }
+
+    bool dump(const std::map<std::string, struct host>& hosts);
+
+    bool vms(std::vector<struct vm>& vms);
+    bool srs(std::vector<struct sr>& srs);
+    bool networks(std::vector<struct network>& networks);
+    bool hosts(std::map<std::string, struct host> &host);
+    bool pifs(std::vector<std::string>& pifs, xen_host host);
+
+    bool write_to_json();
+    bool backupset_list(std::vector<struct backup_set>& bsets);
+
+    bool restore_vdi(const std::string& storage_dir,
+                     const std::string& set_id,
+                     const std::string& sr_uuid,
+                     const std::string& vm_uuid,
+                     std::vector<struct vbd>& vbds);
+
+    bool restore_vif(const std::string& vm_uuid,
+                     const std::string& network_uuid,
+                     const struct vif& vif);
+
     bool get_vm(xen_vm x_vm, struct vm& vm, bool snapshot = false);
     std::string export_url(const std::string& host,
                            xen_task task,
@@ -163,11 +179,9 @@ private:
 
     bool restore_vm_full(const std::string& storage_dir,
                          const std::string& set_id,
-                         const std::string& sr_uuid,
                          std::string& vm_uuid);
     bool restore_vm_diff(const std::string& storage_dir,
                          const std::string& set_id,
-                         const std::string& sr_uuid,
                          const std::string& vm_uuid);
 
     bool add_backup_set(const struct backup_set &bset);
@@ -182,16 +196,18 @@ private:
                        bool template_flag = true);
     bool create_new_vm_by_meta(std::string& vm_uuid, const struct vm& v);
     bool create_new_vm_by_template(std::string& vm_uuid);
+
     void dump_vm(const struct vm& v);
     void dump_vbd(const struct vbd& vb);
     void dump_vif(const struct vif& vf);
+    void dump_sr(const struct sr& sr);
+    void dump_backupset(const struct backup_set& bset);
 
     std::string find_basevdi_by_userdevice(const struct vm& v, const std::string& userdevice);
     void update_backup_set(const std::vector<struct backup_set>& bsets);
     bool delete_snapshot(xen_vm vm);
 
     bool scan_pif(struct xen_pif_record_opt_set *pifs);
-    bool pifs(std::vector<std::string>& pifs, xen_host host);
 private:
     xen_session* session_;
     std::string host_;

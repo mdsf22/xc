@@ -20,28 +20,20 @@ void dump_vm(const struct args& args)
 {
     Xe_Client c(args.url, args.username, args.password);
     c.connect();
-    c.scan_hosts();
     c.scan_vms();
-    c.dump();
 }
 
 void dump_all(const struct args& args)
 {
     Xe_Client c(args.url, args.username, args.password);
     c.connect();
-    c.scan_hosts();
-    c.scan_vms();
-    c.scan_srs();
-    c.write_to_json();
+    c.scan_all();
 }
 
 void backup_vm(const struct args& args, const std::string& vm_uuid)
 {
     Xe_Client c(args.url, args.username, args.password);
     c.connect();
-    // c.scan_hosts();
-    // c.scan_vms();
-
     c.backup_vm(vm_uuid, args.storage_dir);
 }
 
@@ -49,19 +41,15 @@ void backup_vm_diff(const struct args& args, const std::string& vm_uuid)
 {
     Xe_Client c(args.url, args.username, args.password);
     c.connect();
-    // c.scan_hosts();
-    // c.scan_vms();
-
     c.backup_vm_diff(vm_uuid, args.storage_dir);
 }
 
 void restore_vm(const struct args& args,
-                const std::string& sr_uuid,
                 const std::string& set_id)
 {
     Xe_Client c(args.url, args.username, args.password);
     c.connect();
-    c.restore_vm(args.storage_dir, sr_uuid, set_id);
+    c.restore_vm(args.storage_dir, set_id);
 }
 
 void dump_srs(const struct args& args)
@@ -74,7 +62,7 @@ void dump_srs(const struct args& args)
 void dump_backupsets(const struct args& args)
 {
     Xe_Client c(args.url, args.username, args.password);
-    c.backupset_list();
+    c.scan_backsets();
 }
 
 void dump_host_networks(const struct args& args)
@@ -97,7 +85,7 @@ void usage()
     std::cout << "   vms: list hosts and vms" << std::endl;
     std::cout << "   backup <vm_uuid>: backup vm by uuid" << std::endl;
     std::cout << "   backup_diff <vm_uuid>: backup diff vm by uuid" << std::endl;
-    std::cout << "   restore <set_id> <sr_uuid>: restore vm from set_id to sr_uuid" << std::endl;
+    std::cout << "   restore <set_id>: restore vm from set_id" << std::endl;
     std::cout << "   srs: list storage repository" << std::endl;
     std::cout << "   networks: list network of host" << std::endl;
     std::cout << "   sets: list backupset" << std::endl;
@@ -172,8 +160,8 @@ int main(int argc, char*argv[])
                 dump_all(args);
                 return 0;
             } else if (strcmp(argv[i], "restore") == 0) {
-                if (argc == 4) {
-                    restore_vm(args, argv[2], argv[3]);
+                if (argc == 3) {
+                    restore_vm(args, argv[2]);
                     return 0;
                 }
             } else if (strcmp(argv[i], "rm") == 0) {
